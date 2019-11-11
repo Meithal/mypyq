@@ -1,0 +1,14 @@
+aiohttp==3.6.2
+async-timeout==3.0.1
+attrs==19.3.0
+chardet==3.0.4
+decorator==4.4.1
+idna==2.8
+multidict==4.5.2
+pbr==5.4.3
+six==1.13.0
+SQLAlchemy==1.3.10
+sqlalchemy-migrate==0.13.0
+sqlparse==0.3.0
+Tempita==0.5.2
+yarl==1.3.0
