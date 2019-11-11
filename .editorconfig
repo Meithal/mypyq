@@ -1,0 +1,10 @@
+
+# top-most EditorConfig file
+root = true
+
+# Unix-style newlines with a newline ending every file
+[*.py]
+end_of_line = lf
+
+[*.{html,py}]
+insert_final_newline = true
