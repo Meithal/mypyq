@@ -2,9 +2,12 @@
 # top-most EditorConfig file
 root = true
 
+[*.js]
+indent_size = 2
+
 # Unix-style newlines with a newline ending every file
 [*.py]
 end_of_line = lf
 
-[*.{html,py}]
+[*.{html,py,js}]
 insert_final_newline = true

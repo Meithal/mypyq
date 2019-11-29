@@ -2,7 +2,7 @@ import os
 import pathlib
 
 
-def get_templates():
+def _get_templates():
     templates = {}
     with pathlib.Path('.') / 'templates' as tplpath:
         for cat in {*os.listdir(tplpath)} - {'__init__.py', '__pycache__'}:
@@ -13,8 +13,7 @@ def get_templates():
     return templates
 
 
-tpls = get_templates()
-expanded = {}
+tpls = _get_templates()
 
 
 def get_template(cat, tpl):
@@ -23,8 +22,7 @@ def get_template(cat, tpl):
 
 def recurse_replace(kwargs, domain, name):
     recur = RecurReplacementHandler(kwargs, get_template(domain, name))
-    ct = get_template(domain, name).format_map(recur)
-    return ct
+    return get_template(domain, name).format_map(recur)
 
 
 class RecurReplacementHandler(dict):
@@ -35,22 +33,24 @@ class RecurReplacementHandler(dict):
         self.initial_values = initial_values
         self.content = self.trunced = content
 
-    def __missing__(self, key):
+    def __missing__(self, item):
 
-        if key.startswith("export_"):
-            _, domain, name, key = key.split("_")
-            self.trunced = self.content.replace(f"{{export_{domain}_{name}_{key}}}", "")
+        if item.startswith("export_"):
+            _, domain, name, key = item.split("_")
+            self.trunced = self.content.replace(
+                "{{export_{domain}_{name}_{key}}}".format(domain=domain, name=name, key=key), ""
+            )
             self.initial_values[key] = self.trunced
             self.initial_values['$to_remove'] += len(self.trunced)
 
             return recurse_replace(self.initial_values, domain, name)
         else:
-            return f"{{{key}}}"
+            return "{{{item}}}".format(item=item)
 
     def __getitem__(self, item):
         if item not in self:
             return self.__missing__(item)
-        return f"{{{item}}}"
+        return "{{{item}}}".format(item=item)
 
 
 class FinalReplacerHandler(dict):
