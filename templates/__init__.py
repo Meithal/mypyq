@@ -3,6 +3,8 @@ import pathlib
 
 
 def _get_templates():
+    # todo: recompile template if changed
+
     templates = {}
     with pathlib.Path('.') / 'templates' as tplpath:
         for cat in {*os.listdir(tplpath)} - {'__init__.py', '__pycache__'}:
@@ -55,7 +57,7 @@ class RecurReplacementHandler(dict):
 
 class FinalReplacerHandler(dict):
     def __missing__(self, key):
-        return f"<<<missing {key} >>>"
+        return f"&lt;&lt;&lt;missing {key} >>>"
 
 
 def parse(domain, name, **kwargs):

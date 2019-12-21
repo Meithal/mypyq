@@ -1,3 +1,60 @@
+@import "settings";
+@import "mixins";
+
 body {
-  background: linear-gradient(#BB239D, #312298);
+  background: linear-gradient($primary, $secondary);
+  height: 100vh;
+  margin: 0;
+  padding: $body-padding;
+  @include flex('ver');
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji";;
+  box-sizing: border-box;
+}
+
+header {
+
+  @include flex('ver');
+
+  h1 {
+    background-image: url("/assets/Warcraft III Reforged Units/Tyrande.png");
+    background-size: contain;
+    background-color: $primary;
+    background-position-x: -2rem;
+    min-height: 120px;
+    background-repeat: no-repeat;
+    text-align: right;
+    margin: 0;
+    @include pad($top: 2rem, $right: 13%);
+    box-sizing: border-box;
+    font-weight: 200;
+    text-transform: lowercase;
+    filter: grayscale(1);
+    color: $background;
+    box-shadow: inset 0 0 0 100px rgba(0, 0, 0, 0.47);
+    @include flex('ver');
+    @include roundbox(14px 14px 0 0);
+
+    &::after {
+      content: " ";
+      border-bottom: 2px solid white;
+      width: 67px;
+      align-self: flex-end;
+      margin-right: 15px;
+      border-radius: 10px;
+    }
+  }
+}
+
+main {
+  background-color: white;
+  @include roundbox(0 0 14px 14px);
+  @include pad($bot: 1em);
+}
+
+footer {
+  color: $background;
+  flex: 1;
+  @include flex('ver');
+  justify-content: flex-end;
+  align-items: center;
 }

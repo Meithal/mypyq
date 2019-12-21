@@ -1,0 +1,31 @@
+@mixin roundbox($radius: 2px) {
+  border-radius: $radius;
+}
+
+@mixin flex($dir: 'ver') {
+  display: flex;
+  @if $dir == 'ver' {
+    flex-direction: column;
+  }
+  @else {
+    flex-direction: row;
+  }
+}
+
+@mixin pad($padding: null, $bot: null, $top: null, $left: null, $right: null) {
+  @if $padding != null {
+    padding: $padding;
+  }
+  @if $bot != null {
+    padding-bottom: $bot;
+  }
+  @if $top != null {
+    padding-top: $top;
+  }
+  @if $left != null {
+    padding-left: $left;
+  }
+  @if $right != null {
+    padding-right: $right;
+  }
+}
