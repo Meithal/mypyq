@@ -9,14 +9,20 @@ import sass
 from aiohttp import web as aiow
 
 import templates
+import settings
+
+templates.add_project(settings.project)
 
 rp = pathlib.Path('.')
 
+projectPath = rp / 'projects' / settings.project
+
 
 async def listen_to_sass_changes(app):
+
     def _compile():
         try:
-            sass.compile(dirname=(rp / 'scss', rp / '_css'), output_style='expanded')
+            sass.compile(dirname=(projectPath / 'scss', rp / '_css'), output_style='expanded')
         except Exception as e:
             print("sass compilation failed", e)
 
@@ -39,19 +45,24 @@ async def listen_to_sass_changes(app):
 
 
 async def start_sass_listener(app):
+
     app['sass_listener'] = asyncio.create_task(listen_to_sass_changes(app))
 
 
 def is_static_request(request: aiow.Request):
     """Checks if the route capturing the request is a static file handler"""
+
     return isinstance(request.match_info.route.resource, aiow.StaticResource)
 
 
 @aiow.middleware
 async def add_custom_css(request, handler):
-    print("add css called", is_static_request(request), request.match_info.route.resource.get_info()) #, pprint.pformat(vars(request)))
-    if not is_static_request(request):
+    print(request)
+    if not is_static_request(request) and hasattr(request.match_info.route, 'resource') and request.match_info.route.resource is not None:
         path = request.match_info.route.resource.get_info().get('path', None)
+
+        print(path)
+
         if path:
             extracss = path[1:]
             if extracss == "":
@@ -67,12 +78,18 @@ routes = aiow.RouteTableDef()
 @routes.get('/')
 @routes.get('/toto')
 async def handle(request):
+    print(request)
     name = request.match_info.get('name', "Anonymous")
     extra_css = request.get('extra_css', '')
-    return aiow.Response(text=templates.parse('site', 'toto', title='Foo', foo='bar', extra_css=extra_css), headers={'Content-Type': 'text/html'})  # tpls['site']['common'])
+    return aiow.Response(text=templates.parse(
+        (settings.project, 'site'),
+        'toto',
+        title='Foo',
+        foo='bar',
+        extra_css=extra_css), headers={'Content-Type': 'text/html'})  # tpls['site']['common'])
 
 routes.static('/_css', rp / '_css')
-routes.static('/assets', rp / 'assets')
+routes.static('/assets', projectPath / 'assets')
 
 
 def main():
