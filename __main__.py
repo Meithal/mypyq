@@ -4,10 +4,12 @@ import pathlib
 import asyncio
 import typing
 import pprint
+import importlib
 
 import sass
 from aiohttp import web as aiow
 
+from logic import utils
 import templates
 import settings
 
@@ -19,7 +21,6 @@ projectPath = rp / 'projects' / settings.project
 
 
 async def listen_to_sass_changes(app):
-
     def _compile():
         try:
             sass.compile(dirname=(projectPath / 'scss', rp / '_css'), output_style='expanded')
@@ -28,9 +29,9 @@ async def listen_to_sass_changes(app):
 
     print("sass listener started")
     _compile()
-    sassfiles : typing.Dict[pathlib.Path, os.stat_result] = {
+    sassfiles: typing.Dict[pathlib.Path, os.stat_result] = {
         f: 0
-        for f in (rp / 'scss').iterdir()
+        for f in (projectPath / 'scss').iterdir()
     }
     for f in sassfiles:
         sassfiles[f] = f.stat()
@@ -45,7 +46,6 @@ async def listen_to_sass_changes(app):
 
 
 async def start_sass_listener(app):
-
     app['sass_listener'] = asyncio.create_task(listen_to_sass_changes(app))
 
 
@@ -58,7 +58,8 @@ def is_static_request(request: aiow.Request):
 @aiow.middleware
 async def add_custom_css(request, handler):
     print(request)
-    if not is_static_request(request) and hasattr(request.match_info.route, 'resource') and request.match_info.route.resource is not None:
+    if not is_static_request(request) and hasattr(request.match_info.route,
+                                                  'resource') and request.match_info.route.resource is not None:
         path = request.match_info.route.resource.get_info().get('path', None)
 
         print(path)
@@ -88,13 +89,24 @@ async def handle(request):
         foo='bar',
         extra_css=extra_css), headers={'Content-Type': 'text/html'})  # tpls['site']['common'])
 
+
 routes.static('/_css', rp / '_css')
 routes.static('/assets', projectPath / 'assets')
 
 
+
 def main():
-    app = aiow.Application(middlewares=[add_custom_css])
+    middlewares = [add_custom_css]
+    print(middlewares)
+    app = aiow.Application(middlewares=middlewares)
     app.on_startup.append(start_sass_listener)
+    for file in utils.clean_parse_folder(projectPath / 'startup'):
+        print('projects.' + settings.project + '.startup.' + str(file).split('.py')[0])
+        app.on_startup.append(
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + str(file).split('.py')[0]),
+                    'middleware_reg')
+        )
+
     logging.basicConfig(level=logging.DEBUG)
     app.add_routes(routes)
     aiow.run_app(app)

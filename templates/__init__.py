@@ -2,13 +2,14 @@ import os
 import pathlib
 from pprint import pprint as pp
 from typing import Tuple
+from logic import utils
 
 tpls = {}
 
 
 def process_templates(path, key):
     with path / 'templates' as tpl_path:
-        for cat in {*os.listdir(tpl_path)} - {'__init__.py', '__pycache__'}:
+        for cat in utils.clean_parse_folder(tpl_path):
             with tpl_path / cat as catpath:
                 for tpl in (t for t in os.listdir(catpath) if t.endswith('.html')):
                     tpls[(key, cat), tpl.split('.')[0]] = open(catpath / tpl).read()
@@ -16,14 +17,12 @@ def process_templates(path, key):
 
 def add_project(project):
     process_templates(pathlib.Path('.') / 'projects' / project, project)
-    pp(tpls)
 
 
 process_templates(pathlib.Path('.'), 'global')
 
 
 def get_template(cat: Tuple[str, str], tpl):
-    print("ask for tpl", cat, tpl, tpls)
     return tpls.get((cat, tpl), "Didn't find any matching template")
 
 
@@ -49,7 +48,6 @@ class RecurReplacementHandler(dict):
 
         if item.startswith("export_"):
             _, domain, name, key = item.split("_")
-            print(domain, item, self.site, self.area)
 
             self.trunced = self.content.replace(
                 "{{export_{domain}_{name}_{key}}}".format(domain=domain, name=name, key=key), ""
