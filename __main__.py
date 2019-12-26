@@ -94,11 +94,11 @@ routes.static('/_css', rp / '_css')
 routes.static('/assets', projectPath / 'assets')
 
 
-
 def main():
     middlewares = [add_custom_css]
     print(middlewares)
     app = aiow.Application(middlewares=middlewares)
+    app['projectPath'] = projectPath
     app.on_startup.append(start_sass_listener)
     for file in utils.clean_parse_folder(projectPath / 'startup'):
         print('projects.' + settings.project + '.startup.' + str(file).split('.py')[0])
