@@ -19,9 +19,6 @@ def add_project(project):
     process_templates(pathlib.Path('.') / 'projects' / project, project)
 
 
-process_templates(pathlib.Path('.'), 'global')
-
-
 def get_template(cat: Tuple[str, str], tpl):
     return tpls.get((cat, tpl), "Didn't find any matching template")
 
@@ -70,7 +67,7 @@ class FinalReplacerHandler(dict):
         return f"&lt;&lt;&lt;missing {key} >>>"
 
 
-def parse(domain, name, **kwargs):
+def parse(domain: Tuple[str, str], name: str, **kwargs):
     kwargs['$to_remove'] = 0
     inter = recurse_replace(kwargs, domain, name)[:-kwargs['$to_remove']]
     final = inter.format_map(FinalReplacerHandler(kwargs)).format_map(FinalReplacerHandler(kwargs))

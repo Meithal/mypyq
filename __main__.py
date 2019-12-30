@@ -3,7 +3,6 @@ import logging
 import pathlib
 import asyncio
 import typing
-import pprint
 import importlib
 
 import sass
@@ -13,10 +12,11 @@ from logic import utils
 import templates
 import settings
 
+templates.process_templates(pathlib.Path('.'), 'global')
 templates.add_project(settings.project)
+print("templates", list(templates.tpls))
 
 rp = pathlib.Path('.')
-
 projectPath = rp / 'projects' / settings.project
 
 
@@ -35,6 +35,7 @@ async def listen_to_sass_changes(app):
     }
     for f in sassfiles:
         sassfiles[f] = f.stat()
+    print("scss files", list(sassfiles))
     while True:
         await asyncio.sleep(2.0)
         for f in sassfiles:
@@ -73,6 +74,18 @@ async def add_custom_css(request, handler):
     return resp
 
 
+@aiow.middleware
+async def render_html(request, handler):
+    resp = await handler(request)
+    if not is_static_request(request) \
+            and hasattr(resp, 'text') \
+            and not resp.text.startswith(templates.get_template((settings.project, settings.maincat), 'common')[:5]):
+        resp.text = templates.parse((settings.project, settings.maincat), request.path[1:])
+
+        resp.headers['Content-Type'] = 'text/html'
+
+    return resp
+
 routes = aiow.RouteTableDef()
 
 
@@ -95,8 +108,8 @@ routes.static('/assets', projectPath / 'assets')
 
 
 def main():
-    middlewares = [add_custom_css]
-    print(middlewares)
+    middlewares = [add_custom_css, render_html]
+    print("middlewares", middlewares)
     app = aiow.Application(middlewares=middlewares)
     app['projectPath'] = projectPath
     app.on_startup.append(start_sass_listener)
@@ -108,7 +121,17 @@ def main():
         )
 
     logging.basicConfig(level=logging.DEBUG)
+
+    for filename in utils.parse_folder(projectPath / 'controllers'):
+
+        module = importlib.import_module(f"projects.{settings.project}.controllers.{filename.stem}")
+        module.View = routes.view(f"/{filename.stem}")(module.View)
+
+    print("routes", list(routes))
     app.add_routes(routes)
+
+    import aiohttp_debugtoolbar
+    aiohttp_debugtoolbar.setup(app)
     aiow.run_app(app)
 
 
