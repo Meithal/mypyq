@@ -14,7 +14,7 @@ import settings
 
 templates.process_templates(pathlib.Path('.'), 'global')
 templates.add_project(settings.project)
-print("templates", list(templates.tpls))
+
 
 rp = pathlib.Path('.')
 projectPath = rp / 'projects' / settings.project
@@ -63,44 +63,52 @@ async def add_custom_css(request, handler):
                                                   'resource') and request.match_info.route.resource is not None:
         path = request.match_info.route.resource.get_info().get('path', None)
 
-        print(path)
-
         if path:
-            extracss = path[1:]
-            if extracss == "":
-                extracss = "index"
-            request['extra_css'] = f"<link href='_css/{extracss}.css' rel='stylesheet' type='text/css'>"
+            extracss = path[1:] or "index"
+            request['extra_css_hook'] = f"<link href='_css/{extracss}.css' rel='stylesheet' type='text/css'>"
     resp = await handler(request)
     return resp
 
 
 @aiow.middleware
 async def render_html(request, handler):
+    print("render html hook start", request)
     resp = await handler(request)
+    print("resp", resp.text)
+    extra_css = request.get('extra_css_hook', '')
     if not is_static_request(request) \
             and hasattr(resp, 'text') \
             and not resp.text.startswith(templates.get_template((settings.project, settings.maincat), 'common')[:5]):
-        resp.text = templates.parse((settings.project, settings.maincat), request.path[1:])
+        tplname = request.path[1:]
+        resp.text = templates.parse(
+            (settings.project, settings.maincat),
+            tplname,
+            extra_css=extra_css,
+            title = f"{settings.project} - {tplname}"
+        )
 
         resp.headers['Content-Type'] = 'text/html'
 
+    print("resp", resp.text)
     return resp
+
 
 routes = aiow.RouteTableDef()
 
 
 @routes.get('/')
-@routes.get('/toto')
 async def handle(request):
     print(request)
-    name = request.match_info.get('name', "Anonymous")
-    extra_css = request.get('extra_css', '')
-    return aiow.Response(text=templates.parse(
-        (settings.project, 'site'),
-        'toto',
-        title='Foo',
-        foo='bar',
-        extra_css=extra_css), headers={'Content-Type': 'text/html'})  # tpls['site']['common'])
+    extra_css = request.get('extra_css_hook', '')
+    return aiow.Response(
+        text=templates.parse(
+            (settings.project, 'site'),
+            'toto',
+            title='Foo',
+            foo='bar',
+            extra_css=extra_css
+        ), headers={'Content-Type': 'text/html'}
+    )  # tpls['site']['common'])
 
 
 routes.static('/_css', rp / '_css')
@@ -113,20 +121,31 @@ def main():
     app = aiow.Application(middlewares=middlewares)
     app['projectPath'] = projectPath
     app.on_startup.append(start_sass_listener)
-    for file in utils.clean_parse_folder(projectPath / 'startup'):
+    for file in utils.parse_folder(projectPath / 'startup'):
         print('projects.' + settings.project + '.startup.' + str(file).split('.py')[0])
         app.on_startup.append(
             getattr(importlib.import_module('projects.' + settings.project + '.startup.' + str(file).split('.py')[0]),
                     'middleware_reg')
         )
 
+        app.on_shutdown.append(
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + str(file).split('.py')[0]),
+                    'on_shutdown')
+        )
+
     logging.basicConfig(level=logging.DEBUG)
 
     for filename in utils.parse_folder(projectPath / 'controllers'):
-
         module = importlib.import_module(f"projects.{settings.project}.controllers.{filename.stem}")
         module.View = routes.view(f"/{filename.stem}")(module.View)
 
+    for project in {folder.name for folder in utils.yield_folders(rp / 'projects')} - {settings.project}:
+        for filename in utils.parse_folder(rp / 'projects' / project / 'controllers'):
+            module = importlib.import_module(f"projects.{project}.controllers.{filename.stem}")
+            module.View = routes.view(f"/{project}/{filename.stem}")(module.View)
+            templates.add_project(project)
+
+    print("templates", list(templates.tpls))
     print("routes", list(routes))
     app.add_routes(routes)
 

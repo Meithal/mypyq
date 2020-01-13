@@ -7,12 +7,13 @@ from logic import utils
 tpls = {}
 
 
-def process_templates(path, key):
-    with path / 'templates' as tpl_path:
-        for cat in utils.clean_parse_folder(tpl_path):
-            with tpl_path / cat as catpath:
-                for tpl in (t for t in os.listdir(catpath) if t.endswith('.html')):
-                    tpls[(key, cat), tpl.split('.')[0]] = open(catpath / tpl).read()
+def process_templates(path: pathlib.Path, key):
+    utils.trace(path, type(path))
+    # with path / 'templates' as tpl_path:
+    for cat in utils.parse_folder(path / 'templates'):
+        # with tpl_path / cat as catpath:
+        for tpl in (t for t in os.listdir(cat) if t.endswith('.html')):
+            tpls[(key, cat), tpl.split('.')[0]] = open(cat / tpl).read()
 
 
 def add_project(project):
