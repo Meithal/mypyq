@@ -12,8 +12,10 @@ def process_templates(path: pathlib.Path, key):
     # with path / 'templates' as tpl_path:
     for cat in utils.parse_folder(path / 'templates'):
         # with tpl_path / cat as catpath:
-        for tpl in (t for t in os.listdir(cat) if t.endswith('.html')):
-            tpls[(key, cat), tpl.split('.')[0]] = open(cat / tpl).read()
+        for tpl in (t for t in cat.iterdir() if t.name.endswith('.html')):
+            print(cat, tpl, cat / tpl , str(cat/tpl))
+            tpls[(key, cat.name), tpl.name.split('.')[0]] = open(str(tpl)).read()
+            # print("process tpl", (key, cat), tpl.split('.')[0], tpls[(key, cat), tpl.split('.')[0]])
 
 
 def add_project(project):
@@ -69,7 +71,9 @@ class FinalReplacerHandler(dict):
 
 
 def parse(domain: Tuple[str, str], name: str, **kwargs):
+    print("ask template", domain, name)
     kwargs['$to_remove'] = 0
     inter = recurse_replace(kwargs, domain, name)[:-kwargs['$to_remove']]
     final = inter.format_map(FinalReplacerHandler(kwargs)).format_map(FinalReplacerHandler(kwargs))
+    print(final)
     return final

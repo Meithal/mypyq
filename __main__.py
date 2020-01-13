@@ -15,7 +15,6 @@ import settings
 templates.process_templates(pathlib.Path('.'), 'global')
 templates.add_project(settings.project)
 
-
 rp = pathlib.Path('.')
 projectPath = rp / 'projects' / settings.project
 
@@ -74,7 +73,7 @@ async def add_custom_css(request, handler):
 async def render_html(request, handler):
     print("render html hook start", request)
     resp = await handler(request)
-    print("resp", resp.text)
+    # print("resp", resp.text)
     extra_css = request.get('extra_css_hook', '')
     if not is_static_request(request) \
             and hasattr(resp, 'text') \
@@ -84,12 +83,12 @@ async def render_html(request, handler):
             (settings.project, settings.maincat),
             tplname,
             extra_css=extra_css,
-            title = f"{settings.project} - {tplname}"
+            title=f"{settings.project} - {tplname}"
         )
 
         resp.headers['Content-Type'] = 'text/html'
 
-    print("resp", resp.text)
+    # print("resp", resp.text)
     return resp
 
 
@@ -124,12 +123,12 @@ def main():
     for file in utils.parse_folder(projectPath / 'startup'):
         print('projects.' + settings.project + '.startup.' + str(file).split('.py')[0])
         app.on_startup.append(
-            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + str(file).split('.py')[0]),
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.name.split('.py')[0]),
                     'middleware_reg')
         )
 
         app.on_shutdown.append(
-            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + str(file).split('.py')[0]),
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.name.split('.py')[0]),
                     'on_shutdown')
         )
 
