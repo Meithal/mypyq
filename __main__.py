@@ -12,7 +12,7 @@ from logic import utils
 import templates
 import settings
 
-templates.process_templates(pathlib.Path('.'), 'global')
+templates.process_templates(pathlib.Path('.'), templates.ProjectName('global'))
 templates.add_project(settings.project)
 
 rp = pathlib.Path('.')
@@ -23,6 +23,7 @@ async def listen_to_sass_changes(app):
     def _compile():
         try:
             sass.compile(dirname=(projectPath / 'scss', rp / '_css'), output_style='expanded')
+            sass.compile(dirname=(rp / 'scss', rp / '_css'), output_style='expanded')
         except Exception as e:
             print("sass compilation failed", e)
 
@@ -57,16 +58,37 @@ def is_static_request(request: aiow.Request):
 
 @aiow.middleware
 async def add_custom_css(request, handler):
-    print(request)
+    # print(request)
     if not is_static_request(request) and hasattr(request.match_info.route,
                                                   'resource') and request.match_info.route.resource is not None:
         path = request.match_info.route.resource.get_info().get('path', None)
 
         if path:
             extracss = path[1:] or "index"
-            request['extra_css_hook'] = f"<link href='_css/{extracss}.css' rel='stylesheet' type='text/css'>"
+            v = request.get('extra_css_hook', '')
+            v += f"    <link href='_css/{extracss}.css' rel='stylesheet' type='text/css'>\n"
+            request['extra_css_hook'] = v
     resp = await handler(request)
     return resp
+
+
+async def debug_bar_html(app):
+    print(list(routes))
+    routes_html = "<ol id='debug_bar'>"
+    for route in routes:
+        if not isinstance(route, aiow.RouteDef):
+            continue
+        routes_html += f"<li><a href='{route.path}'>{route.path}</a></li>"
+    return routes_html + "</ol>"
+
+
+@aiow.middleware
+async def add_debug_bar(request, handler):
+    v = request.get('extra_css_hook', '')
+    v += f"    <link href='_css/debug.css' rel='stylesheet' type='text/css'>\n"
+    request['extra_css_hook'] = v
+    request['extra_html_hook'] = await debug_bar_html(request.app)
+    return await handler(request)
 
 
 @aiow.middleware
@@ -75,15 +97,19 @@ async def render_html(request, handler):
     resp = await handler(request)
     # print("resp", resp.text)
     extra_css = request.get('extra_css_hook', '')
+    extra_html = request.get('extra_html_hook', '')
     if not is_static_request(request) \
             and hasattr(resp, 'text') \
-            and not resp.text.startswith(templates.get_template((settings.project, settings.maincat), 'common')[:5]):
+            and not resp.text.startswith(
+        templates.template_text(settings.project, settings.maincat, 'common')[:5]
+    ):
         tplname = request.path[1:]
         resp.text = templates.parse(
             (settings.project, settings.maincat),
             tplname,
             extra_css=extra_css,
-            title=f"{settings.project} - {tplname}"
+            title=f"{settings.project} - {tplname}",
+            extra_html=extra_html
         )
 
         resp.headers['Content-Type'] = 'text/html'
@@ -99,13 +125,15 @@ routes = aiow.RouteTableDef()
 async def handle(request):
     print(request)
     extra_css = request.get('extra_css_hook', '')
+    extra_html = request.get('extra_html_hook', '')
     return aiow.Response(
         text=templates.parse(
-            (settings.project, 'site'),
+            templates.TplCat((templates.ProjectName(settings.project), templates.CatName('site'))),
             'toto',
             title='Foo',
             foo='bar',
-            extra_css=extra_css
+            extra_css=extra_css,
+            extra_html=extra_html
         ), headers={'Content-Type': 'text/html'}
     )  # tpls['site']['common'])
 
@@ -115,20 +143,19 @@ routes.static('/assets', projectPath / 'assets')
 
 
 def main():
-    middlewares = [add_custom_css, render_html]
+    middlewares = [add_debug_bar, add_custom_css, render_html]
     print("middlewares", middlewares)
     app = aiow.Application(middlewares=middlewares)
     app['projectPath'] = projectPath
     app.on_startup.append(start_sass_listener)
     for file in utils.parse_folder(projectPath / 'startup'):
-        print('projects.' + settings.project + '.startup.' + str(file).split('.py')[0])
         app.on_startup.append(
-            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.name.split('.py')[0]),
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.stem),
                     'middleware_reg')
         )
 
         app.on_shutdown.append(
-            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.name.split('.py')[0]),
+            getattr(importlib.import_module('projects.' + settings.project + '.startup.' + file.stem),
                     'on_shutdown')
         )
 

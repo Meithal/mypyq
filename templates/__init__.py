@@ -1,37 +1,45 @@
 import os
 import pathlib
 from pprint import pprint as pp
-from typing import Tuple
+from typing import Tuple, NewType, Dict, Mapping
 from logic import utils
 
-tpls = {}
+
+ProjectName = NewType('ProjectName', str)
+CatName = NewType('CatName', str)
+TplName = NewType('TplName', str)
+TplCat = NewType('TplCat', Tuple[ProjectName, CatName])
+TplKey = NewType('TplKey', Tuple[TplCat, TplName])
+
+tpls: Dict[TplKey, str] = {}
 
 
-def process_templates(path: pathlib.Path, key):
-    utils.trace(path, type(path))
-    # with path / 'templates' as tpl_path:
+def process_templates(path: pathlib.Path, key: ProjectName):
     for cat in utils.parse_folder(path / 'templates'):
-        # with tpl_path / cat as catpath:
         for tpl in (t for t in cat.iterdir() if t.name.endswith('.html')):
-            print(cat, tpl, cat / tpl , str(cat/tpl))
-            tpls[(key, cat.name), tpl.name.split('.')[0]] = open(str(tpl)).read()
-            # print("process tpl", (key, cat), tpl.split('.')[0], tpls[(key, cat), tpl.split('.')[0]])
+            tpls[TplKey((TplCat((key, CatName(cat.name))), TplName(tpl.stem)))] = open(str(tpl)).read()
 
 
 def add_project(project):
     process_templates(pathlib.Path('.') / 'projects' / project, project)
 
 
-def get_template(cat: Tuple[str, str], tpl):
-    return tpls.get((cat, tpl), "Didn't find any matching template")
+def _get_template(cat: TplCat, tpl: TplName) -> str:
+    return tpls.get(TplKey((cat, tpl)), "Didn't find any matching template")
 
 
-def recurse_replace(kwargs, domain, name):
-    recur = RecurReplacementHandler(kwargs, get_template(domain, name), domain)
-    return get_template(domain, name).format_map(recur)
+def template_text(project: str, cat: str, tpl: str):
+    """convenient accessor with generic types"""
+    return _get_template(TplCat((ProjectName(project), CatName(cat))), TplName(tpl))
 
 
-class RecurReplacementHandler(dict):
+def _recurse_replace(kwargs, domain: TplCat, name):
+    recur = _RecurReplacementHandler(kwargs, _get_template(domain, name), domain)
+    return _get_template(domain, name).format_map(recur)
+
+
+class _RecurReplacementHandler(dict):
+    site: ProjectName
 
     def __init__(self, initial_values, content, domain):
         super().__init__(initial_values)
@@ -41,7 +49,7 @@ class RecurReplacementHandler(dict):
         if isinstance(domain, tuple):
             self.site, self.area = domain
         else:
-            self.site = 'global'
+            self.site = ProjectName('global')
             self.area = domain
 
     def __missing__(self, item):
@@ -53,9 +61,9 @@ class RecurReplacementHandler(dict):
                 "{{export_{domain}_{name}_{key}}}".format(domain=domain, name=name, key=key), ""
             )
             self.initial_values[key] = self.trunced
-            self.initial_values['$to_remove'] += len(self.trunced)
+            self.initial_values['_to_remove'] += len(self.trunced)
 
-            return recurse_replace(self.initial_values, (self.site, domain), name)
+            return _recurse_replace(self.initial_values, TplCat((self.site, domain)), name)
         else:
             return "{{{item}}}".format(item=item)
 
@@ -65,15 +73,13 @@ class RecurReplacementHandler(dict):
         return "{{{item}}}".format(item=item)
 
 
-class FinalReplacerHandler(dict):
+class _FinalReplacerHandler(dict):
     def __missing__(self, key):
         return f"&lt;&lt;&lt;missing {key} >>>"
 
 
-def parse(domain: Tuple[str, str], name: str, **kwargs):
-    print("ask template", domain, name)
-    kwargs['$to_remove'] = 0
-    inter = recurse_replace(kwargs, domain, name)[:-kwargs['$to_remove']]
-    final = inter.format_map(FinalReplacerHandler(kwargs)).format_map(FinalReplacerHandler(kwargs))
-    print(final)
+def parse(domain: TplCat, name: str, **kwargs):
+    kwargs['_to_remove'] = 0
+    inter = _recurse_replace(kwargs, domain, name)[:-kwargs['_to_remove']]
+    final = inter.format_map(_FinalReplacerHandler(kwargs)).format_map(_FinalReplacerHandler(kwargs))
     return final

@@ -5,13 +5,13 @@ import pathlib
 import typing
 
 
-def parse_folder(pathlike: pathlib.Path) -> typing.Generator[pathlib.Path, None, None]:
+def parse_folder(pathlike: pathlib.Path) -> typing.Iterable[pathlib.Path]:
     for filename in pathlike.iterdir():
         if not filename.stem.startswith('__'):
             yield filename
 
 
-def yield_folders(pathlike: pathlib.Path) -> typing.Generator[pathlib.Path, None, None]:
+def yield_folders(pathlike: pathlib.Path) -> typing.Iterable[pathlib.Path]:
     for filename in pathlike.iterdir():
         if filename.is_dir() and not filename.name.startswith('_'):
             yield filename
