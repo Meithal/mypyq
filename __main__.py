@@ -7,17 +7,19 @@ import importlib
 
 import sass
 from aiohttp import web as aiow
-
-from logic import utils
-import templates
+print("foo")
+from logic import utils, templating
 import settings
+trace = utils.trace
 
-templates.process_templates(pathlib.Path('.'), templates.ProjectName('global'))
-templates.add_project(settings.project)
+
+templating.load_files(pathlib.Path('.'), templating.ProjectName('global'))
+templating.add_project(settings.project)
 
 rp = pathlib.Path('.')
 projectPath = rp / 'projects' / settings.project
 
+print("foo")
 
 async def listen_to_sass_changes(app):
     def _compile():
@@ -25,9 +27,9 @@ async def listen_to_sass_changes(app):
             sass.compile(dirname=(projectPath / 'scss', rp / '_css'), output_style='expanded')
             sass.compile(dirname=(rp / 'scss', rp / '_css'), output_style='expanded')
         except Exception as e:
-            print("sass compilation failed", e)
+            trace("sass compilation failed", e)
 
-    print("sass listener started")
+    trace("sass listener started")
     _compile()
     sassfiles: typing.Dict[pathlib.Path, os.stat_result] = {
         f: 0
@@ -35,13 +37,13 @@ async def listen_to_sass_changes(app):
     }
     for f in sassfiles:
         sassfiles[f] = f.stat()
-    print("scss files", list(sassfiles))
+    trace("scss files", list(sassfiles))
     while True:
         await asyncio.sleep(2.0)
         for f in sassfiles:
             stats = f.stat()
             if sassfiles[f].st_mtime < stats.st_mtime:
-                print(f, "has changed, recompiling...")
+                trace(f, "has changed, recompiling...")
                 _compile()
                 sassfiles[f] = stats
 
@@ -58,7 +60,7 @@ def is_static_request(request: aiow.Request):
 
 @aiow.middleware
 async def add_custom_css(request, handler):
-    # print(request)
+
     if not is_static_request(request) and hasattr(request.match_info.route,
                                                   'resource') and request.match_info.route.resource is not None:
         path = request.match_info.route.resource.get_info().get('path', None)
@@ -72,70 +74,54 @@ async def add_custom_css(request, handler):
     return resp
 
 
-async def debug_bar_html(app):
-    print(list(routes))
-    routes_html = "<ol id='debug_bar'>"
-    for route in routes:
-        if not isinstance(route, aiow.RouteDef):
-            continue
-        routes_html += f"<li><a href='{route.path}'>{route.path}</a></li>"
-    return routes_html + "</ol>"
-
-
 @aiow.middleware
 async def add_debug_bar(request, handler):
     v = request.get('extra_css_hook', '')
     v += f"    <link href='_css/debug.css' rel='stylesheet' type='text/css'>\n"
     request['extra_css_hook'] = v
-    request['extra_html_hook'] = await debug_bar_html(request.app)
+    request['extra_html_hook'] = "<ol id='debug_bar'>{}</ol>\n".format('\n'.join(f"<li><a href='{route.path}'>{route.path}</a></li>" for route in routes if isinstance(route, aiow.RouteDef)))
     return await handler(request)
 
 
 @aiow.middleware
 async def render_html(request, handler):
-    print("render html hook start", request)
-    resp = await handler(request)
-    # print("resp", resp.text)
+    # trace("render html hook start", request, handler)
+    try:
+        resp = await handler(request)
+    except Exception as e:
+        # trace(e)
+        resp = e
     extra_css = request.get('extra_css_hook', '')
     extra_html = request.get('extra_html_hook', '')
+    # trace("resp", resp, vars(resp))
     if not is_static_request(request) \
-            and hasattr(resp, 'text') \
-            and not resp.text.startswith(
-        templates.template_text(settings.project, settings.maincat, 'common')[:5]
-    ):
+            and hasattr(resp, 'text'):   # no binarycontent (images)
         tplname = request.path[1:]
-        resp.text = templates.parse(
-            (settings.project, settings.maincat),
-            tplname,
+        trace("tplname", tplname)
+        if not tplname:
+            if templating.has_template(settings.project, settings.maincat, 'index'):
+                folder = (settings.project, settings.maincat)
+                tplname = 'index'
+            else:
+                folder = ('global', 'default')
+        else:
+            folder = (settings.project, settings.maincat)
+        resp.text = templating.parse(
+            folder,
+            tplname or settings.default_template,
             extra_css=extra_css,
             title=f"{settings.project} - {tplname}",
-            extra_html=extra_html
+            extra_html=extra_html,
+            defcontent=resp.text
         )
 
         resp.headers['Content-Type'] = 'text/html'
 
-    # print("resp", resp.text)
+    # print("resp2", resp.text)
     return resp
 
 
 routes = aiow.RouteTableDef()
-
-
-@routes.get('/')
-async def handle(request):
-    print(request)
-    extra_css = request.get('extra_css_hook', '')
-    extra_html = request.get('extra_html_hook', '')
-    return aiow.Response(
-        text=templates.parse(
-            templates.TplCat((templates.ProjectName(settings.project), templates.CatName('site'))),
-            'toto',
-            title='Foo',
-            foo='bar',
-            extra_css=extra_css,
-            extra_html=extra_html
-        ), headers={'Content-Type': 'text/html'}
-    )  # tpls['site']['common'])
 
 
 routes.static('/_css', rp / '_css')
@@ -144,9 +130,12 @@ routes.static('/assets', projectPath / 'assets')
 
 def main():
     middlewares = [add_debug_bar, add_custom_css, render_html]
-    print("middlewares", middlewares)
+    trace("middlewares", middlewares)
+
     app = aiow.Application(middlewares=middlewares)
+
     app['projectPath'] = projectPath
+
     app.on_startup.append(start_sass_listener)
     for file in utils.parse_folder(projectPath / 'startup'):
         app.on_startup.append(
@@ -169,14 +158,17 @@ def main():
         for filename in utils.parse_folder(rp / 'projects' / project / 'controllers'):
             module = importlib.import_module(f"projects.{project}.controllers.{filename.stem}")
             module.View = routes.view(f"/{project}/{filename.stem}")(module.View)
-            templates.add_project(project)
+            if filename.stem == 'index':
+                module.View = routes.view(f"/")(module.View)  # make index point onto /
+        templating.add_project(project)
 
-    print("templates", list(templates.tpls))
-    print("routes", list(routes))
+    trace("templates", list(templating.tpls))
+
     app.add_routes(routes)
 
-    import aiohttp_debugtoolbar
-    aiohttp_debugtoolbar.setup(app)
+    trace("routes", type(routes), list(routes))
+    trace("routes dispatch", type(app.router.routes()), list(app.router.routes()))
+
     aiow.run_app(app)
 
 
