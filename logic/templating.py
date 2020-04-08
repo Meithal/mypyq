@@ -4,7 +4,6 @@ import string
 from typing import Tuple, NewType, Dict
 from logic import utils
 
-
 ProjectName = NewType('ProjectName', str)
 CatName = NewType('CatName', str)
 TplName = NewType('TplName', str)
@@ -19,13 +18,13 @@ def load_files(path: pathlib.Path, key: ProjectName):
             tpls[key, CatName(cat.name), TplName(tpl.stem)] = open(str(tpl)).read()
     print(tpls.keys())
 
+
 class _Catcher(dict):
     has_include: bool = False
     include_into: tuple
     include_key: str
 
     def __missing__(self, key):
-        # print("missing key", key)
         if key.startswith("export_"):
             self.has_include = True
             __, cat, name, keyv = key.split("_")
@@ -40,9 +39,14 @@ class _InPlace(dict):
         return f"{{{key}}}"
 
 
+class _Suppresser(dict):
+    def __missing__(self, key):
+        return ""
+
+
 def template_text(project: str, cat: str, tpl: str) -> str:
     """convenient accessor with generic types"""
-    return tpls[(project, cat, tpl)]  # _get_template(TplCat((ProjectName(project), CatName(cat))), TplName(tpl))
+    return tpls[(project, cat, tpl)]
 
 
 def add_project(project):
@@ -53,7 +57,6 @@ def add_project(project):
         text = content.format_map(catcher)
         if catcher.has_include:
             include_into = template_text(project, catcher.include_into[0], catcher.include_into[1])
-            # print("include into", include_into)
             tpls[key] = include_into.format_map(_InPlace({catcher.include_key: text}))
 
 
@@ -61,29 +64,5 @@ def has_template(site, cat, name):
     return (site, cat, name) in tpls
 
 
-def parse(cat = ('global', 'default'), name = 'index', **data):
-    return tpls[cat[0], cat[1], name]
-
-
-class MyFormatter(string.Formatter):
-
-    def __init__(self, string_):
-        self.string = string_
-
-    def format(*args, **kwargs):
-        # print(args, kwargs)
-        self, *args = args
-        return super(MyFormatter, self).format(*args, **kwargs)
-        # return format(self.string, args[0])
-
-    # def get_field(self, field_name, args, kwargs):
-    #     return self.string
-
-    def get_value(self, key, args, kwargs):
-        return self.string
-
-
-tpl = MyFormatter("test")
-# print(tpl.format("test{0}"))
-
-# exit()
+def parse(cat=('global', 'default'), name='index', **data):
+    return template_text(cat[0], cat[1], name).format_map(_Suppresser(data))
