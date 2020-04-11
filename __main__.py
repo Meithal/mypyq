@@ -81,7 +81,7 @@ def is_static_request(request: aiow.Request):
     return isinstance(request.match_info.route.resource, aiow.StaticResource)
 
 
-def project_cat_page_from_path(path: str):
+def project_cat_page_from_path(path: str) -> typing.Tuple[str, str, str]:
     if not path:
         if templating.has_template(settings.project, settings.maincat, 'index'):
             return settings.project, settings.maincat, 'index'
@@ -92,22 +92,27 @@ def project_cat_page_from_path(path: str):
     if path.count('/') < 2:
         project, page = path.split('/')
         return project, "site", page
-    return path.split('/')
+    return tuple(path.split('/'))
 
+def make_css_links(*foo):
+    return "foo"
 
 @aiow.middleware
 async def add_custom_css(request, handler):
 
     if isinstance(request.match_info.route.resource, aiowud.PlainResource):
         path = request.match_info.route.resource.url_for()
-        extra_css = request.get('_extra_css_hook', '')
+        extra_css = request.get('_extra_css_hook', [])
 
-        extra_css += f"    <link href='_css/{settings.project}_common.css' rel='stylesheet' type='text/css'>\n"
+        project, cat, page = project_cat_page_from_path(path.path[1:])
+
+        if (rp / '_css' / f"{project}_common.css").exists():
+            extra_css.append(f'_css/{project}_common.css')
 
         trace(path, extra_css)
-        extracssfile = path.name or f"{settings.project}_index.css"
-        if (rp / '_css' / extracssfile).exists():
-            extra_css += f"    <link href='_css/{extracssfile}' rel='stylesheet' type='text/css'>\n"
+        pathcss = path.name or f"{project}_index.css"
+        if (rp / '_css' / pathcss).exists():
+            extra_css.append(f"_css/{pathcss}")
 
         trace(path, extra_css)
 
@@ -131,13 +136,14 @@ async def render_html(request, handler):
     extra_html = request.get('_extra_html_hook', '')
     if not is_static_request(request) \
             and hasattr(resp, 'text'):   # no binarycontent (images)
-        tplname = request.path[1:]
+        tplname = request.path[1:] or 'Index'
         project, cat, page = project_cat_page_from_path(request.path[1:])
         extra_vars = {key: val for key, val in request.items() if not key.startswith('_')}
         resp.text = templating.parse(
+            request,
             (project, cat),
             page,
-            extra_css=extra_css,
+            extracss=extra_css,
             title=f"{settings.project} - {tplname}",
             extra_html=extra_html,
             defcontent=resp.text,

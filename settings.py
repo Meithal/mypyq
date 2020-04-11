@@ -1,3 +1,3 @@
 project = 'w3vault'
 maincat = 'site'
-default_template = 'default'
+default_template = 'common'
