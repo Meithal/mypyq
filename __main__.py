@@ -33,7 +33,6 @@ async def listen_to_sass_changes(app):
                 continue
 
             for scss_file in (project / 'scss').iterdir():
-                # trace(scss_filename, scss_filename.stem)
                 if scss_file.name.startswith('_'):
                     continue
                 try:
@@ -94,8 +93,6 @@ def project_cat_page_from_path(path: str) -> typing.Tuple[str, str, str]:
         return project, "site", page
     return tuple(path.split('/'))
 
-def make_css_links(*foo):
-    return "foo"
 
 @aiow.middleware
 async def add_custom_css(request, handler):
@@ -108,6 +105,9 @@ async def add_custom_css(request, handler):
 
         if (rp / '_css' / f"{project}_common.css").exists():
             extra_css.append(f'_css/{project}_common.css')
+        else:
+            extra_css.append(f'_css/{projectPath.name}_common.css')
+            # use default common if none is defined for current project
 
         trace(path, extra_css)
         pathcss = path.name or f"{project}_index.css"
@@ -136,7 +136,7 @@ async def render_html(request, handler):
     extra_html = request.get('_extra_html_hook', '')
     if not is_static_request(request) \
             and hasattr(resp, 'text'):   # no binarycontent (images)
-        tplname = request.path[1:] or 'Index'
+        tplname = request.path[1:] or 'index'
         project, cat, page = project_cat_page_from_path(request.path[1:])
         extra_vars = {key: val for key, val in request.items() if not key.startswith('_')}
         resp.text = templating.parse(
@@ -162,6 +162,14 @@ routes.static('/_css', rp / '_css')
 routes.static('/assets', projectPath / 'assets')
 for project_route in utils.yield_folders(rp / 'projects'):
     routes.static(f"/{project_route.name}/scss", project_route / 'scss')
+
+
+def plain_routes(routes_: [aiow.RouteDef]):
+    return [route.path for route in routes_ if isinstance(route.path, str)]
+
+
+def nooproute(_):
+    return aiow.Response(text='')
 
 
 def main():
@@ -204,17 +212,21 @@ def main():
 
             trace(globals()[f"{project.name}_startup_{file.stem}"])
 
-    for filename in utils.parse_folder(projectPath / 'controllers'):
-        module = importlib.import_module(f"projects.{settings.project}.controllers.{filename.stem}")
-        module.View = routes.view(f"/{filename.stem}")(module.View)
-
-    for project in {folder.name for folder in utils.yield_folders(rp / 'projects')} - {settings.project}:
+    for project in {folder.name for folder in utils.yield_folders(rp / 'projects')}:
         for filename in utils.parse_folder(rp / 'projects' / project / 'controllers'):
             module = importlib.import_module(f"projects.{project}.controllers.{filename.stem}")
             module.View = routes.view(f"/{project}/{filename.stem}")(module.View)
-            if filename.stem == 'index':
-                module.View = routes.view(f"/")(module.View)  # this makes index point onto /
+            if project == settings.project:
+                module.View = routes.view(f"/{filename.stem}")(module.View)
+                if filename.stem == 'index':
+                    module.View = routes.view(f"/")(module.View)  # this makes index point onto /
+
         templating.add_project(project)
+
+    global nooproute
+    for tpl in [f"/{el[0]}/{el[2]}" for el in list(templating.tpls)]:
+        if tpl not in plain_routes(routes):
+            nooproute = routes.get(tpl)(nooproute)
 
     trace("templates", list(templating.tpls))
 

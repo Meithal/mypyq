@@ -92,16 +92,13 @@ def has_template(site, cat, name):
 
 class MyFormatter(string.Formatter):
     def get_value(self, key, args, kwargs):
-        print("get key", key, args, kwargs)
+        # print("get key", key, args, kwargs)
         if isinstance(key, int):
             if key > len(args):
                 args.append(None)
-            # return args[key]
         else:
             if key not in kwargs:
                 kwargs[key] = f"{{{key}}}"
-            # return kwargs[key]
-        # kwargs[key] = ''
         return super().get_value(key, args, kwargs)
 
     def convert_field(self, value, conversion):
@@ -111,7 +108,6 @@ class MyFormatter(string.Formatter):
             return super().convert_field(value, conversion)
 
     def format_field(self, value, format_spec):
-        trace("format spec", value, format_spec)
         if format_spec == 'gen_css_links':
             return super().format_field(str(value)[-2] + format_spec + '}', '')
         else:
