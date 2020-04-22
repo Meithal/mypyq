@@ -22,52 +22,62 @@ if not (rp / '_css').exists():
     (rp / '_css').mkdir()
 
 
-async def listen_to_sass_changes(app):
-    def _compile():
+def yield_scss_folders(rootdir: pathlib.Path):
+    for project in (rootdir / 'projects').iterdir():
+        if not (project / 'scss').exists():
+            continue
+        yield project, project / 'scss'
 
-        for css in (rp / '_css').iterdir():
-            css.unlink()
-        for project in (rp / 'projects').iterdir():
 
-            if not (project / 'scss').exists():
+def compile_sass():
+    for css in (rp / '_css').iterdir():
+        css.unlink()
+
+    for project, scss_folder in yield_scss_folders(rp):
+
+        for scss_file in scss_folder.iterdir():
+            if scss_file.name.startswith('_'):
                 continue
-
-            for scss_file in (project / 'scss').iterdir():
-                if scss_file.name.startswith('_'):
-                    continue
-                try:
-                    css, sourcemap = sass.compile(
-                        filename=str(scss_file),
-                        source_map_filename=f"{scss_file.parent / (project.name + '_' + scss_file.stem)}.css.map",
-                        source_map_root=f"../{project.name}/scss/",
-                        source_comments=True,
+            try:
+                css, sourcemap = sass.compile(
+                    filename=str(scss_file),
+                    source_map_filename=f"{scss_file.parent / (project.name + '_' + scss_file.stem)}.css.map",
+                    source_map_root=f"../{project.name}/scss/",
+                    source_comments=True,
+                    include_paths=(
+                        str(scss_folder) for _, scss_folder in yield_scss_folders(rp)
                     )
-                except Exception as e:
-                    trace("sass compilation failed", e)
-                    raise
+                )
+            except Exception as e:
+                trace("sass compilation failed", e)
+                raise
 
-                with open(rp / '_css' / f"{project.name}_{scss_file.stem}.css", 'w') as write_file:
-                    write_file.write(css)
-                with open(rp / '_css' / f"{project.name}_{scss_file.stem}.css.map", 'w') as write_file:
-                    write_file.write(sourcemap)
+            with open(rp / '_css' / f"{project.name}_{scss_file.stem}.css", 'w') as write_file:
+                write_file.write(css)
+            with open(rp / '_css' / f"{project.name}_{scss_file.stem}.css.map", 'w') as write_file:
+                write_file.write(sourcemap)
 
+
+async def listen_to_sass_changes(app):
+    # todo: uee app?
+    # todo extract the file watcher to reuse it for template reparsing
     trace("sass listener started")
-    _compile()
-    sassfiles: typing.Dict[pathlib.Path, os.stat_result] = {
+    compile_sass()
+    sass_files: typing.Dict[pathlib.Path, os.stat_result] = {
         f: 0
         for f in (projectPath / 'scss').iterdir()
     }
-    for f in sassfiles:
-        sassfiles[f] = f.stat()
-    trace("scss files", list(sassfiles))
+    for f in sass_files:
+        sass_files[f] = f.stat()
+    trace("scss files", list(sass_files))
     while True:
         await asyncio.sleep(2.0)
-        for f in sassfiles:
+        for f in sass_files:
             stats = f.stat()
-            if sassfiles[f].st_mtime < stats.st_mtime:
+            if sass_files[f].st_mtime < stats.st_mtime:
                 trace(f, "has changed, recompiling...")
-                _compile()
-                sassfiles[f] = stats
+                compile_sass()
+                sass_files[f] = stats
 
 
 async def start_sass_listener(app):
@@ -91,7 +101,7 @@ def project_cat_page_from_path(path: str) -> typing.Tuple[str, str, str]:
     if path.count('/') < 2:
         project, page = path.split('/')
         return project, "site", page
-    return tuple(path.split('/'))
+    return typing.cast(typing.Tuple[str, str, str], tuple(path.split('/')))
 
 
 @aiow.middleware
@@ -109,12 +119,9 @@ async def add_custom_css(request, handler):
             extra_css.append(f'_css/{projectPath.name}_common.css')
             # use default common if none is defined for current project
 
-        trace(path, extra_css)
-        pathcss = path.name or f"{project}_index.css"
+        pathcss = path.name and f"{project}_{path.name}.css" or f"{project}_index.css"
         if (rp / '_css' / pathcss).exists():
             extra_css.append(f"_css/{pathcss}")
-
-        trace(path, extra_css)
 
         if '_extra_css_hook' in request:
             request['_extra_css_hook'] += extra_css
@@ -139,6 +146,7 @@ async def render_html(request, handler):
         tplname = request.path[1:] or 'index'
         project, cat, page = project_cat_page_from_path(request.path[1:])
         extra_vars = {key: val for key, val in request.items() if not key.startswith('_')}
+        extra_vars.update({key: val for key, val in resp.items() if not key.startswith('_')})
         resp.text = templating.parse(
             request,
             (project, cat),
@@ -168,62 +176,81 @@ def plain_routes(routes_: [aiow.RouteDef]):
     return [route.path for route in routes_ if isinstance(route.path, str)]
 
 
-def nooproute(_):
-    return aiow.Response(text='')
+def all_projects() -> typing.Iterable[pathlib.Path]:
+    for project in (rp / 'projects').iterdir():
+        if project.name.startswith('_'):
+            continue
+        yield project
+
+
+def all_statrup_files() -> typing.Iterable[typing.Tuple[pathlib.Path, pathlib.Path]]:
+    for project in all_projects():
+        if not (project / 'startup').exists():
+            continue
+        for file in utils.parse_folder(project / 'startup'):
+            yield project, file
+
+
+def all_controllers_files() -> typing.Iterable[typing.Tuple[pathlib.Path, pathlib.Path]]:
+    for project in all_projects():
+        if not (project / 'controllers').exists():
+            continue
+        for file in utils.parse_folder(project / 'controllers'):
+            yield project, file
+
+
+def all_models_files() -> typing.Iterable[typing.Tuple[pathlib.Path, pathlib.Path]]:
+    for project in all_projects():
+        if not (project / 'models').exists():
+            continue
+        for file in utils.parse_folder(project / 'models'):
+            yield project, file
 
 
 def main():
+
     logging.basicConfig(level=logging.DEBUG)
 
     middlewares = [add_custom_css, render_html]
     trace("middlewares", middlewares)
 
     app = aiow.Application(middlewares=middlewares)
-
-    app['projectPath'] = projectPath
+    app['resources'] = {}
 
     app.on_startup.append(start_sass_listener)
 
-    for project in (rp / 'projects').iterdir():
+    for project, file in all_statrup_files():
+        mod_ = importlib.import_module('projects.' + project.name + '.startup.' + file.stem)
 
-        if not (project / 'startup').exists():
-            continue
+        if hasattr(mod_, 'on_startup'):
+            app.on_startup.append(getattr(mod_, 'on_startup'))
 
-        for file in utils.parse_folder(project / 'startup'):
+        if hasattr(mod_, 'on_shutdown'):
+            app.on_shutdown.append(getattr(mod_, 'on_shutdown'))
 
-            globals()[f"{project.name}_startup_{file.stem}"] = importlib.import_module(
-                'projects.' + project.name + '.startup.' + file.stem
-            )
+        if hasattr(mod_, 'middleware_reg'):
+            app.middlewares.append(aiow.middleware(mod_.middleware_reg))
 
-            temp = globals()[f"{project.name}_startup_{file.stem}"]
+    for project, file in all_controllers_files():
+        module = importlib.import_module(f"projects.{project.name}.controllers.{file.stem}")
+        module.View = routes.view(f"/{project.name}/{file.stem}")(module.View)
+        if project.name == settings.project:
+            module.View = routes.view(f"/{file.stem}")(module.View)
+            if file.stem == 'index':
+                module.View = routes.view(f"/")(module.View)  # this makes index point onto /
 
-            if hasattr(temp, 'task_reg'):
-                app.on_startup.append(
-                    getattr(temp, 'task_reg')
-                )
+    for project in all_projects():
+        templating.add_project(project.name)
 
-            if hasattr(temp, 'on_shutdown'):
-                app.on_shutdown.append(
-                    getattr(temp, 'on_shutdown')
-                )
+    for project, model in all_models_files():
+        module = importlib.import_module(f"projects.{project.name}.models.{model.stem}")
+        if hasattr(module, 'load_existing_resources'):
+            app.on_startup.append(getattr(module, 'load_existing_resources'))
 
-            if hasattr(temp, 'middleware_reg'):
-                app.middlewares.append(aiow.middleware(temp.middleware_reg))
+    # registers pure template routes
+    async def nooproute(_):
+        return aiow.Response(text='')
 
-            trace(globals()[f"{project.name}_startup_{file.stem}"])
-
-    for project in {folder.name for folder in utils.yield_folders(rp / 'projects')}:
-        for filename in utils.parse_folder(rp / 'projects' / project / 'controllers'):
-            module = importlib.import_module(f"projects.{project}.controllers.{filename.stem}")
-            module.View = routes.view(f"/{project}/{filename.stem}")(module.View)
-            if project == settings.project:
-                module.View = routes.view(f"/{filename.stem}")(module.View)
-                if filename.stem == 'index':
-                    module.View = routes.view(f"/")(module.View)  # this makes index point onto /
-
-        templating.add_project(project)
-
-    global nooproute
     for tpl in [f"/{el[0]}/{el[2]}" for el in list(templating.tpls)]:
         if tpl not in plain_routes(routes):
             nooproute = routes.get(tpl)(nooproute)
@@ -236,6 +263,8 @@ def main():
     trace("routes dispatch", type(app.router.routes()), list(app.router.routes()))
 
     aiow.run_app(app)
+
+    print("exiting")
 
 
 if __name__ == '__main__':

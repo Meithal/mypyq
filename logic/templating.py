@@ -1,4 +1,3 @@
-import re
 import pathlib
 import string
 from typing import Tuple, NewType, Dict
@@ -22,8 +21,8 @@ def gencsslinks(files, req: aiow.Request):
 def load_files(path: pathlib.Path, key: ProjectName):
     for cat in utils.parse_folder(path / 'templates'):
         for tpl in (t for t in cat.iterdir() if t.name.endswith('.html')):
-            tpls[key, CatName(cat.name), TplName(tpl.stem)] = open(str(tpl)).read()
-    print(tpls.keys())
+            with open(str(tpl)) as content:
+                tpls[key, CatName(cat.name), TplName(tpl.stem)] = content.read()
 
 
 class _Catcher(dict):
@@ -73,8 +72,8 @@ def template_text(project: str, cat: str, tpl: str) -> str:
     return tpls.setdefault((project, cat, tpl), tpls[(settings.project, settings.maincat, settings.default_template)])
 
 
-def add_project(project):
-    load_files(pathlib.Path('.') / 'projects' / project, project)
+def add_project(project: str):
+    load_files(pathlib.Path('.') / 'projects' / project, ProjectName(project))
 
     for key, content in tpls.items():
         catcher = _Catcher()
