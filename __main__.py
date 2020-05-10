@@ -4,6 +4,8 @@ import pathlib
 import asyncio
 import typing
 import importlib
+import time
+import datetime
 
 import sass
 from aiohttp import web as aiow, web_urldispatcher as aiowud
@@ -105,13 +107,27 @@ def project_cat_page_from_path(path: str) -> typing.Tuple[str, str, str]:
 
 
 @aiow.middleware
+async def first_middleware(request, handler):
+
+    request['_extra_css_hook'] = []
+    request['_extra_html_hook'] = []
+    request['start_time'] = time.time_ns()
+    resp = await handler(request)
+
+    return resp
+
+
+@aiow.middleware
 async def add_custom_css(request, handler):
 
     if isinstance(request.match_info.route.resource, aiowud.PlainResource):
         path = request.match_info.route.resource.url_for()
         extra_css = request.get('_extra_css_hook', [])
 
-        project, cat, page = project_cat_page_from_path(path.path[1:])
+        if not isinstance(request.match_info.route.resource, aiowud.DynamicResource):
+            project, cat, page = project_cat_page_from_path(request.path[1:])
+        else:
+            project, cat, page = settings.project, settings.maincat, settings.default_template
 
         if (rp / '_css' / f"{project}_common.css").exists():
             extra_css.append(f'_css/{project}_common.css')
@@ -123,17 +139,17 @@ async def add_custom_css(request, handler):
         if (rp / '_css' / pathcss).exists():
             extra_css.append(f"_css/{pathcss}")
 
-        if '_extra_css_hook' in request:
-            request['_extra_css_hook'] += extra_css
-        else:
-            request['_extra_css_hook'] = extra_css
+        request['_extra_css_hook'] += extra_css
+
+    if isinstance(request.match_info.route.resource, aiowud.DynamicResource):
+        request['_extra_css_hook'].append(f'_css/{projectPath.name}_common.css')
 
     resp = await handler(request)
     return resp
 
 
 @aiow.middleware
-async def render_html(request, handler):
+async def render_html(request: aiow.Request, handler):
     try:
         resp = await handler(request)
     except Exception as e:
@@ -144,9 +160,13 @@ async def render_html(request, handler):
     if not is_static_request(request) \
             and hasattr(resp, 'text'):   # no binarycontent (images)
         tplname = request.path[1:] or 'index'
-        project, cat, page = project_cat_page_from_path(request.path[1:])
+        if not isinstance(request.match_info.route.resource, aiowud.DynamicResource):
+            project, cat, page = project_cat_page_from_path(request.path[1:])
+        else:
+            project, cat, page = settings.project, settings.maincat, settings.default_template
         extra_vars = {key: val for key, val in request.items() if not key.startswith('_')}
         extra_vars.update({key: val for key, val in resp.items() if not key.startswith('_')})
+        extra_vars['elapsed_time'] = datetime.timedelta(microseconds=(time.time_ns() - request['start_time']) / 1_000)
         resp.text = templating.parse(
             request,
             (project, cat),
@@ -204,18 +224,27 @@ def all_models_files() -> typing.Iterable[typing.Tuple[pathlib.Path, pathlib.Pat
         if not (project / 'models').exists():
             continue
         for file in utils.parse_folder(project / 'models'):
-            yield project, file
+            if file.suffix == '.py':
+                yield project, file
 
 
 def main():
 
     logging.basicConfig(level=logging.DEBUG)
 
-    middlewares = [add_custom_css, render_html]
+    import mpyq
+    import mypyq
+    arch = mpyq.MPQArchive("projects/w3vault/maps/epicwar/AoS GT 2 v1.01.w3m", listfile=False)
+    arch = mypyq.MPQArchive("projects/w3vault/maps/epicwar/AoS GT 2 v1.01.w3m")
+
+    middlewares = [first_middleware, add_custom_css, render_html]
     trace("middlewares", middlewares)
 
     app = aiow.Application(middlewares=middlewares)
     app['resources'] = {}
+
+    dummy = importlib.import_module('dummy')
+    dummy.app_holder = app
 
     app.on_startup.append(start_sass_listener)
 
@@ -259,8 +288,8 @@ def main():
 
     app.add_routes(routes)
 
-    trace("routes", type(routes), list(routes))
-    trace("routes dispatch", type(app.router.routes()), list(app.router.routes()))
+    trace("routes", list(routes))
+    trace("routes dispatch", list(app.router.routes()))
 
     aiow.run_app(app)
 

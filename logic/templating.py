@@ -42,6 +42,7 @@ class _Catcher(dict):
         if key == "_html":
             self.has_include = True
             self.include_into = 'default', 'default'
+            # self.include_into = settings.project, settings.maincat
             self.include_key = 'contents'
             self.override_project = 'global'
             return ""
