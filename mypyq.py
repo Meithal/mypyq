@@ -9,6 +9,26 @@ war3magic = b"HM3W"
 mpqUserDataMagic = b"MPQ\x1B"
 mpqHeaderMagic = b"MPQ\x1A"
 
+common_files = [
+    '(attributes)',
+    '(listfile)',
+    'war3map.doo',
+    'war3map.j',
+    'war3map.mmp',
+    'war3map.shd',
+    'war3map.w3c',
+    'war3map.w3e',
+    'war3map.w3i',
+    'war3map.w3r',
+    'war3map.w3u',
+    'war3map.wct',
+    'war3map.wpm',
+    'war3map.wtg',
+    'war3map.wts',
+    'war3mapMap.blp',
+    'war3mapUnits.doo'
+]
+
 
 class ArchiveTypes(enum.Enum):
     w3map = enum.auto()

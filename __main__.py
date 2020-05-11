@@ -9,7 +9,7 @@ import datetime
 
 import sass
 from aiohttp import web as aiow, web_urldispatcher as aiowud
-from logic import utils, templating
+from logic import utils, templating, resources
 import settings
 trace = utils.trace
 
@@ -241,7 +241,7 @@ def main():
     trace("middlewares", middlewares)
 
     app = aiow.Application(middlewares=middlewares)
-    app['resources'] = {}
+    app['resources'] = resources.ResourcesProxy()
 
     dummy = importlib.import_module('dummy')
     dummy.app_holder = app
@@ -275,6 +275,8 @@ def main():
         module = importlib.import_module(f"projects.{project.name}.models.{model.stem}")
         if hasattr(module, 'load_existing_resources'):
             app.on_startup.append(getattr(module, 'load_existing_resources'))
+        if hasattr(module, 'shutdown_resource_manager'):
+            app.on_shutdown.append(getattr(module, 'shutdown_resource_manager'))
 
     # registers pure template routes
     async def nooproute(_):
