@@ -85,19 +85,19 @@ class Resource(ResourceDC):
                         cls.templates[key] = f.read()
         views = cls.views
         for _, val in views.items():
-            path, instance = val
+            pattern, instance, name = val.values()
             instance.resource_type = cls
-            aiohttp_app.router.add_view(path, instance)
+            aiohttp_app.router.add_view(pattern, instance, name=name)
 
         super().__init_subclass__(**kwargs)
-
-    def __getattribute__(self, item):
-        # print("getting", item)
-        return object.__getattribute__(self, item)
 
     @property
     def persistent_name(self):
         return f"{getattr(self, self.discriminant)}"
+
+    @property
+    def short_discriminant(self):
+        return getattr(self, self.discriminant).split(':')[-1]
 
     async def update_fields(self, values: dict):
         values = {k: v for k, v in values.items() if k in (f.name for f in dataclasses.fields(self))}
