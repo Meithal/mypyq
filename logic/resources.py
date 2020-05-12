@@ -90,14 +90,6 @@ class Resource:
     def short_discriminant(self):
         return getattr(self, self.discriminant).split(':')[-1]
 
-    async def update_fields(self, values: dict):
-        values = {k: v for k, v in values.items() if k in (f.name for f in dataclasses.fields(self))}
-        while 'redis' not in self.aiohttp_app:
-            await asyncio.sleep(2)
-
-        redis: aioredis.Redis = self.aiohttp_app['redis']
-        redis.hmset_dict(self.persistent_name, values)
-
     def after_redis_load(self):
         if self._created_at is None:
             self._created_at = time.time_ns()
@@ -111,14 +103,21 @@ class Resource:
 
 
 class ResourcesProxy(dict):
-    def __init__(self):
+    def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
         self.resources = {}
+        self.app = app
+        self.redis = None
         super().__init__()
 
     def __getitem__(self, item):
         if item not in self:
             return None
         return dataclasses.asdict(self.resources[item], dict_factory=Ourdict)
+
+    async def _ensure_redis(self):
+        while 'redis' not in self.app:
+            await asyncio.sleep(2)
+        self.redis = self.app['redis']
 
     def get_resource(self, k) -> Resource:
         return self.resources[k]
@@ -130,8 +129,20 @@ class ResourcesProxy(dict):
         return self[k]
 
     async def rename_resource(self, redis, old, new):
+        await self._ensure_redis()
         await redis.rename(old, new)
         self.resources[new] = self.resources.pop(old)
+
+    async def update_resource(self, resource_key: str, mapping: dict):
+        await self._ensure_redis()
+        dc = self.resources[resource_key]
+        values = {k: v for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
+
+        self.redis.hmset_dict(dc.persistent_name, values)
+
+        for k, v in mapping.items():
+            setattr(dc, k, v)
+
 
 
 class ResourcefulApp(aiow.Application):

@@ -242,7 +242,7 @@ def main():
     trace("middlewares", middlewares)
 
     app = resources.ResourcefulApp(middlewares=middlewares)
-    app['resources'] = resources.ResourcesProxy()
+    app['resources'] = resources.ResourcesProxy(app)
 
     dummy = importlib.import_module('dummy')
     dummy.app_holder = app
