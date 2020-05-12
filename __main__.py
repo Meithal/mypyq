@@ -229,6 +229,7 @@ def all_models_files() -> typing.Iterable[typing.Tuple[pathlib.Path, pathlib.Pat
 
 
 def main():
+    # todo: better errors messages?
 
     logging.basicConfig(level=logging.DEBUG)
 
@@ -240,7 +241,7 @@ def main():
     middlewares = [first_middleware, add_custom_css, render_html]
     trace("middlewares", middlewares)
 
-    app = aiow.Application(middlewares=middlewares)
+    app = resources.ResourcefulApp(middlewares=middlewares)
     app['resources'] = resources.ResourcesProxy()
 
     dummy = importlib.import_module('dummy')

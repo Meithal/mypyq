@@ -38,31 +38,22 @@ async def load_redis_resources(app: aiow.Application, key: typing.Tuple[str, ...
         resource: Resource = getattr(Resource.resources_types[resource_key], 'from_redis_hash_key')(red_key)
         async for name, val in redis.ihscan(red_key):
             setattr(resource, name.decode('utf8'), val.decode('utf8'))
-        app['resources'][red_key.decode('utf8')] = resource
+
+        app['resources'].set_resource(red_key.decode('utf8'), resource)
+
         resource.after_redis_load()
         resource.final_after_redis_load()
 
-    print(app['resources'])
+    trace(app['resources'])
 
 
 @dataclasses.dataclass()
-class ResourceDC:
-
-    def __post_init__(self):
-        # print("after init")
-        # for field in dataclasses.fields(self):
-        #     # trace(field)
-        #     if hasattr(self, f"{field.name}_getter"):
-        #         setattr(self, field.name, property(getattr(self, f"{field.name}_getter")))
-        pass
-
-
-class Resource(ResourceDC):
-    resources_types: typing.Dict[str, typing.Type['Resource']] = {}
+class Resource:
+    resources_types: typing.ClassVar[typing.Dict[str, typing.Type['Resource']]] = {}
     views: typing.ClassVar[typing.Dict[str, aiow.View]] = {}
     _resource_fully_loaded = False
-    _created_at = 0
-    templates: typing.Dict[str, str] = {}
+    _created_at = None
+    templates: typing.ClassVar[typing.Dict[str, str]] = {}
     project: typing.ClassVar[str] = ""
     key: typing.ClassVar[typing.Tuple[str, ...]] = ""
     discriminant: typing.ClassVar[str] = ""
@@ -120,13 +111,31 @@ class Resource(ResourceDC):
 
 
 class ResourcesProxy(dict):
+    def __init__(self):
+        self.resources = {}
+        super().__init__()
+
     def __getitem__(self, item):
         if item not in self:
             return None
-        return dataclasses.asdict(dict.__getitem__(self, item), dict_factory=Ourdict)
+        return dataclasses.asdict(self.resources[item], dict_factory=Ourdict)
 
     def get_resource(self, k) -> Resource:
-        return dict.__getitem__(self, k)
+        return self.resources[k]
+
+    def set_resource(self, key: str, instance: Resource):
+        self.resources[key] = instance
 
     def get_resource_safe(self, k) -> Ourdict:
         return self[k]
+
+    async def rename_resource(self, redis, old, new):
+        await redis.rename(old, new)
+        self.resources[new] = self.resources.pop(old)
+
+
+class ResourcefulApp(aiow.Application):
+
+    @property
+    def resources(self) -> ResourcesProxy:
+        return self["resources"]
