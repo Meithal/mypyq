@@ -10,6 +10,65 @@ import aioredis
 from logic.utils import trace
 
 
+class Ourdict(dict):
+
+    def __init__(self, *vals, **kwargs):
+        print("init")
+        super().__init__(*vals, **kwargs)
+
+
+class ResourcesProxy(dict):
+    def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
+        self.resources = {}
+        self.app = app
+        self.redis = None
+        super().__init__()
+
+    def __getitem__(self, item):
+        if item not in self:
+            return None
+        return dataclasses.asdict(self.resources[item], dict_factory=Ourdict)
+
+    async def _ensure_redis(self):
+        while 'redis' not in self.app:
+            await asyncio.sleep(2)
+        self.redis = self.app['redis']
+
+    def get_resource(self, k) -> typing.ForwardRef('Resource'):
+        return self.resources[k]
+
+    def get_resource_safe(self, k) -> Ourdict:
+        return self[k]
+
+    async def rename_resource(self, redis, old, new):
+        await self._ensure_redis()
+        await redis.rename(old, new)
+        self.resources[new] = self.resources.pop(old)
+
+    async def update_resource(self, resource_key: str, mapping: dict):
+        await self._ensure_redis()
+        dc = self.resources[resource_key]
+        values = {k: v for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
+
+        self.redis.hmset_dict(dc.persistent_name, values)
+
+        for k, v in mapping.items():
+            setattr(dc, k, v)
+
+    async def create_resource(self, resource_key: str, discriminant: str):
+        if ':' not in resource_key:
+            raise TypeError("Malformed resource key", resource_key)
+        instance = Resource.resources_types[resource_key](discriminant)
+        self.resources[getattr(instance, discriminant)] = instance
+
+
+class ResourcefulApp(aiow.Application):
+
+    @property
+    def resources(self) -> ResourcesProxy:
+        return self["resources"]
+
+
 async def rename_prefix(app: aiow.Application, from_: str, to: str):
     import re
 
@@ -18,17 +77,12 @@ async def rename_prefix(app: aiow.Application, from_: str, to: str):
         await redis.rename(key, re.sub(from_, to, key.decode('utf8'), count=1))
 
 
-class Ourdict(dict):
+async def load_redis_resources(app: ResourcefulApp, key: typing.Tuple[str, ...]):
+    while 'redis' not in app:
+        await asyncio.sleep(2)
 
-    def __init__(self, *vals, **kwargs):
-        print("init")
-        super().__init__(*vals, **kwargs)
-
-
-async def load_redis_resources(app: aiow.Application, key: typing.Tuple[str, ...]):
     redis = app['redis']
 
-    redis_key = '_'.join(map(lambda k: k.lower(), key))
     class_name = ''.join(map(lambda k: k.capitalize(), key))
 
     resource_key = next(v[0] for v in Resource.resources_types.items() if v[1].__name__ == class_name)
@@ -39,7 +93,7 @@ async def load_redis_resources(app: aiow.Application, key: typing.Tuple[str, ...
         async for name, val in redis.ihscan(red_key):
             setattr(resource, name.decode('utf8'), val.decode('utf8'))
 
-        app['resources'].set_resource(red_key.decode('utf8'), resource)
+        app.resources.set_resource(red_key.decode('utf8'), resource)
 
         resource.after_redis_load()
         resource.final_after_redis_load()
@@ -57,11 +111,11 @@ class Resource:
     project: typing.ClassVar[str] = ""
     key: typing.ClassVar[typing.Tuple[str, ...]] = ""
     discriminant: typing.ClassVar[str] = ""
+    in_redis = False
 
     def __init_subclass__(cls, aiohttp_app: aiow.Application, discriminant: str, **kwargs):
         cls.aiohttp_app = aiohttp_app
         cls.discriminant = discriminant
-        print("init a resource", cls, kwargs)
 
         _, project, _, key = cls.__module__.split('.')
         cls.project = project
@@ -100,53 +154,3 @@ class Resource:
     @property
     def created_at_getter(self):
         return self._created_at
-
-
-class ResourcesProxy(dict):
-    def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
-        self.resources = {}
-        self.app = app
-        self.redis = None
-        super().__init__()
-
-    def __getitem__(self, item):
-        if item not in self:
-            return None
-        return dataclasses.asdict(self.resources[item], dict_factory=Ourdict)
-
-    async def _ensure_redis(self):
-        while 'redis' not in self.app:
-            await asyncio.sleep(2)
-        self.redis = self.app['redis']
-
-    def get_resource(self, k) -> Resource:
-        return self.resources[k]
-
-    def set_resource(self, key: str, instance: Resource):
-        self.resources[key] = instance
-
-    def get_resource_safe(self, k) -> Ourdict:
-        return self[k]
-
-    async def rename_resource(self, redis, old, new):
-        await self._ensure_redis()
-        await redis.rename(old, new)
-        self.resources[new] = self.resources.pop(old)
-
-    async def update_resource(self, resource_key: str, mapping: dict):
-        await self._ensure_redis()
-        dc = self.resources[resource_key]
-        values = {k: v for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
-
-        self.redis.hmset_dict(dc.persistent_name, values)
-
-        for k, v in mapping.items():
-            setattr(dc, k, v)
-
-
-
-class ResourcefulApp(aiow.Application):
-
-    @property
-    def resources(self) -> ResourcesProxy:
-        return self["resources"]
