@@ -34,7 +34,7 @@ class ResourcesProxy(dict):
     def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
         self.resources = {}
         self.app = app
-        self.redis = None
+        self.redis: aioredis.Redis = None
         super().__init__()
 
     def __getitem__(self, item):
@@ -47,17 +47,20 @@ class ResourcesProxy(dict):
             await asyncio.sleep(2)
         self.redis = self.app['redis']
 
-    def get_resource(self, k: ResourceKey) -> typing.ForwardRef('Resource'):
+    def get_resource(self, k: typing.Union[ResourceKey, bytes]) -> typing.ForwardRef('Resource'):
+        if type(k) is bytes:
+            k = k.decode()
         if k not in self.resources:
             return None
         return self.resources[k]
 
-    def loop_through(self, key):
-        pass
+    async def loop_through(self, key):
+        async for k in self.redis.iscan(match=f"{key}:*"):
+            yield self.get_resource(k)
 
-    async def rename_resource(self, redis, old, new):
+    async def rename_resource(self, old, new):
         await self._ensure_redis()
-        await redis.rename(old, new)
+        await self.redis.rename(old, new)
         self.resources[new] = self.resources.pop(old)
 
         return self.resources[new]
@@ -126,9 +129,9 @@ class Resource:
     project: typing.ClassVar[str] = ""
     key: typing.ClassVar[typing.Tuple[str, ...]] = ""
     discriminant: typing.ClassVar[str] = ""
-    in_redis = False
+    aiohttp_app: typing.ClassVar[ResourcefulApp] = None
 
-    def __init_subclass__(cls, aiohttp_app: aiow.Application, discriminant: str, **kwargs):
+    def __init_subclass__(cls, aiohttp_app: ResourcefulApp, discriminant: str, **kwargs):
         cls.aiohttp_app = aiohttp_app
         cls.discriminant = discriminant
 
@@ -159,13 +162,14 @@ class Resource:
     def make_persistent_name(cls, name: str) -> ResourceKey:
         return ResourceKey(f"{cls.project}:{cls.__name__}:{name}")
 
+    @classmethod
+    async def loop_through(cls):
+        async for resource in cls.aiohttp_app.resources.loop_through(f"{cls.project}:{cls.__name__}"):
+            yield resource
+
     def after_redis_load(self):
         if self._created_at is None:
             self._created_at = time.time_ns()
 
     def final_after_redis_load(self):
         self._resource_fully_loaded = True
-
-    @property
-    def created_at_getter(self):
-        return self._created_at
