@@ -17,7 +17,20 @@ class Ourdict(dict):
         super().__init__(*vals, **kwargs)
 
 
+class ResourceKey(str):
+    def __init__(self, value):
+
+        if ":" not in value:
+            raise ValueError("Resource key should be fully qualified")
+
+        super().__init__()
+
+
 class ResourcesProxy(dict):
+    """
+    This is a bridge to the resources store of the app, the resources are a collection of datasets
+    We also handle the persistence, with the lest round trips possible
+    """
     def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
         self.resources = {}
         self.app = app
@@ -34,32 +47,38 @@ class ResourcesProxy(dict):
             await asyncio.sleep(2)
         self.redis = self.app['redis']
 
-    def get_resource(self, k) -> typing.ForwardRef('Resource'):
+    def get_resource(self, k: ResourceKey) -> typing.ForwardRef('Resource'):
+        if k not in self.resources:
+            return None
         return self.resources[k]
 
-    def get_resource_safe(self, k) -> Ourdict:
-        return self[k]
+    def loop_through(self, key):
+        pass
 
     async def rename_resource(self, redis, old, new):
         await self._ensure_redis()
         await redis.rename(old, new)
         self.resources[new] = self.resources.pop(old)
 
-    async def update_resource(self, resource_key: str, mapping: dict):
-        await self._ensure_redis()
-        dc = self.resources[resource_key]
-        values = {k: v for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
+        return self.resources[new]
 
-        self.redis.hmset_dict(dc.persistent_name, values)
+    async def batch_resource(self, resource_key: ResourceKey, mapping: typing.Dict[str, str]):
+        await self._ensure_redis()
+        dc = self.get_resource(resource_key)
+        if not dc:
+            project, rtype, disc = resource_key.split(":")
+            dc = Resource.resources_types[f"{project}:{rtype}"](disc)
+            for key, value in mapping.items():
+                setattr(dc, key, value)
+            self.resources[dc.persistent_name] = dc
+        values = {k: str(v) for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
+
+        await self.redis.hmset_dict(str(dc.persistent_name), values)
 
         for k, v in mapping.items():
             setattr(dc, k, v)
 
-    async def create_resource(self, resource_key: str, discriminant: str):
-        if ':' not in resource_key:
-            raise TypeError("Malformed resource key", resource_key)
-        instance = Resource.resources_types[resource_key](discriminant)
-        self.resources[getattr(instance, discriminant)] = instance
+        return dc
 
 
 class ResourcefulApp(aiow.Application):
@@ -88,13 +107,9 @@ async def load_redis_resources(app: ResourcefulApp, key: typing.Tuple[str, ...])
     resource_key = next(v[0] for v in Resource.resources_types.items() if v[1].__name__ == class_name)
 
     async for red_key in redis.iscan(match=f'{resource_key}:*'):
-
-        resource: Resource = getattr(Resource.resources_types[resource_key], 'from_redis_hash_key')(red_key)
-        async for name, val in redis.ihscan(red_key):
-            setattr(resource, name.decode('utf8'), val.decode('utf8'))
-
-        app.resources.set_resource(red_key.decode('utf8'), resource)
-
+        resource = await app.resources.batch_resource(
+            ResourceKey(red_key.decode()), await redis.hgetall(red_key, encoding='utf-8')
+        )
         resource.after_redis_load()
         resource.final_after_redis_load()
 
@@ -137,12 +152,12 @@ class Resource:
         super().__init_subclass__(**kwargs)
 
     @property
-    def persistent_name(self):
-        return f"{getattr(self, self.discriminant)}"
+    def persistent_name(self) -> ResourceKey:
+        return ResourceKey(f"{self.project}:{self.__class__.__name__}:{getattr(self, self.discriminant)}")
 
-    @property
-    def short_discriminant(self):
-        return getattr(self, self.discriminant).split(':')[-1]
+    @classmethod
+    def make_persistent_name(cls, name: str) -> ResourceKey:
+        return ResourceKey(f"{cls.project}:{cls.__name__}:{name}")
 
     def after_redis_load(self):
         if self._created_at is None:
