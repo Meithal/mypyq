@@ -148,23 +148,24 @@ class PrepareCryptTable:
 HashType = typing.NewType('HashType', int)
 
 
+@dataclasses.dataclass
 class MPQArchive(PrepareCryptTable):
+    path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
     crypt_table: typing.ClassVar[typing.Dict[int, int]]
-    file: io.BufferedReader
-    user_data: typing.Optional[MPQUserData]
-    header: MPQHeader
-    hash_table: [MPQHashEntry] = []
-    block_table: [MPQBlockEntry] = []
+    file: io.BufferedReader = None
+    user_data: typing.Optional[MPQUserData] = None
+    header: MPQHeader = None
+    hash_table: [MPQHashEntry] = dataclasses.field(default_factory=list)
+    block_table: [MPQBlockEntry] = dataclasses.field(default_factory=list)
 
-    def __init__(self, filename):
+    def __post_init__(self):
 
-        path = pathlib.Path(filename)
-        print(path.exists(), path.resolve(), path.stat())
-        if not path.exists():
-            raise OSError(f"{path.resolve()} doesn't appear to be a file.")
-        self.filesize = path.stat().st_size
-        self.file_gen = yield_file_stream(path)
+        print(self.path.exists(), self.path.resolve(), self.path.stat())
+        if not self.path.exists():
+            raise OSError(f"{self.path.resolve()} doesn't appear to be a file.")
+        self.filesize = self.path.stat().st_size
+        self.file_gen = yield_file_stream(self.path)
         self.file = next(self.file_gen)
         kind, offset = self.type_and_offset()
         self.file.seek(offset)

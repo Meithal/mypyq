@@ -34,7 +34,7 @@ class ResourcesProxy(dict):
     def __init__(self, app: typing.ForwardRef('ResourcefulApp')):
         self.resources = {}
         self.app = app
-        self.redis: aioredis.Redis = None
+        self.redis: aioredis.Redis
         super().__init__()
 
     def __getitem__(self, item):
@@ -65,21 +65,36 @@ class ResourcesProxy(dict):
 
         return self.resources[new]
 
-    async def batch_resource(self, resource_key: ResourceKey, mapping: typing.Dict[str, str]):
+    async def batch_resource(
+            self,
+            resource_key: ResourceKey,
+            mapping: typing.Dict[str, str],
+            existing_dataclass: dataclasses.dataclass = None
+    ):
         await self._ensure_redis()
         dc = self.get_resource(resource_key)
+        was_created = False
         if not dc:
             project, rtype, disc = resource_key.split(":")
-            dc = Resource.resources_types[f"{project}:{rtype}"](disc)
-            for key, value in mapping.items():
-                setattr(dc, key, value)
-            self.resources[dc.persistent_name] = dc
-        values = {k: str(v) for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
+            if not existing_dataclass:
+                dc = Resource.resources_types[f"{project}:{rtype}"](redis_key=disc)
+                self.resources[dc.persistent_name] = dc
+            else:
+                dc = existing_dataclass
+                setattr(existing_dataclass, 'redis_key', resource_key)
+                self.resources[dc.persistent_name] = dc
+            was_created = True
 
-        await self.redis.hmset_dict(str(dc.persistent_name), values)
+        if mapping:
+            values = {k: str(v) for k, v in mapping.items() if k in (f.name for f in dataclasses.fields(dc))}
 
-        for k, v in mapping.items():
-            setattr(dc, k, v)
+            await self.redis.hmset_dict(str(dc.persistent_name), values)
+
+            for k, v in mapping.items():
+                setattr(dc, k, v)
+
+        if was_created:
+            await dc.after_resource_load()
 
         return dc
 
@@ -110,11 +125,9 @@ async def load_redis_resources(app: ResourcefulApp, key: typing.Tuple[str, ...])
     resource_key = next(v[0] for v in Resource.resources_types.items() if v[1].__name__ == class_name)
 
     async for red_key in redis.iscan(match=f'{resource_key}:*'):
-        resource = await app.resources.batch_resource(
+        await app.resources.batch_resource(
             ResourceKey(red_key.decode()), await redis.hgetall(red_key, encoding='utf-8')
         )
-        resource.after_redis_load()
-        resource.final_after_redis_load()
 
     trace(app['resources'])
 
@@ -123,7 +136,6 @@ async def load_redis_resources(app: ResourcefulApp, key: typing.Tuple[str, ...])
 class Resource:
     resources_types: typing.ClassVar[typing.Dict[str, typing.Type['Resource']]] = {}
     views: typing.ClassVar[typing.Dict[str, aiow.View]] = {}
-    _resource_fully_loaded = False
     _created_at = None
     templates: typing.ClassVar[typing.Dict[str, str]] = {}
     project: typing.ClassVar[str] = ""
@@ -167,9 +179,7 @@ class Resource:
         async for resource in cls.aiohttp_app.resources.loop_through(f"{cls.project}:{cls.__name__}"):
             yield resource
 
-    def after_redis_load(self):
+    async def after_resource_load(self):
+        """Expects all the dataclass fields to be set"""
         if self._created_at is None:
             self._created_at = time.time_ns()
-
-    def final_after_redis_load(self):
-        self._resource_fully_loaded = True
