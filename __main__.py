@@ -236,6 +236,8 @@ def main():
     # import mpyq
     # import mypyq
     # arch = mpyq.MPQArchive("projects/w3vault/maps/epicwar/AoS GT 2 v1.01.w3m", listfile=False)
+    # for f in mypyq.common_files:
+    #     print(arch.read_file(f))
     # arch = mypyq.MPQArchive(pathlib.Path("projects/w3vault/maps/epicwar/AoS GT 2 v1.01.w3m"))
 
     middlewares = [first_middleware, add_custom_css, render_html]

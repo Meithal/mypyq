@@ -81,7 +81,7 @@ class ResourcesProxy(dict):
                 self.resources[dc.persistent_name] = dc
             else:
                 dc = existing_dataclass
-                setattr(existing_dataclass, 'redis_key', resource_key)
+                setattr(existing_dataclass, 'redis_key', disc)
                 self.resources[dc.persistent_name] = dc
             was_created = True
 
