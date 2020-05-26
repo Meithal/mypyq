@@ -8,6 +8,9 @@ import zlib
 import bz2
 import itertools
 
+import explode
+import subprocess
+
 
 def pairwise(iterable):
     "s -> (s0,s1), (s1,s2), (s2, s3), ..."
@@ -176,6 +179,15 @@ class PrepareCryptTable:
 HashType = typing.NewType('HashType', int)
 
 
+def write_to_file(content):
+    with open("dump", 'wb') as file:
+        file.write(content)
+    return explode.explode(content)
+
+
+def analyze_pkware(content):
+    pass
+
 @dataclasses.dataclass
 class MPQArchive(PrepareCryptTable):
     path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
@@ -313,7 +325,7 @@ class MPQArchive(PrepareCryptTable):
             self.done_with_file()
             return value, errors
 
-        sectors, remainder = divmod(block.uncompressed_size, self.header.sector_size)  # why uncompressed
+        sectors, remainder = divmod(block.uncompressed_size, self.header.sector_size)
         if remainder:
             sectors += 1
 
@@ -321,7 +333,6 @@ class MPQArchive(PrepareCryptTable):
             sectors += 1
 
         if block.other_compressions or block.pkware_imploded:
-            # todo: fetch positions of each compressed bit
             positions_data = self.file.read(struct.calcsize("<I") * (sectors + 1))
             if block.encrypted:
                 key = self._hash(filename, 'TABLE')
@@ -336,7 +347,18 @@ class MPQArchive(PrepareCryptTable):
                 to_read = raw_bytes_to_read[start:end]
                 if block.encrypted:
                     to_read = self._decrypt(to_read, key + i)
-                uncompress = self._uncompress(to_read, force_pkware=block.pkware_imploded)
+                if block.other_compressions:
+                    left_to_decompress = block.uncompressed_size - len(result)
+                    if left_to_decompress > self.header.sector_size:
+                        left_to_decompress = self.header.sector_size
+                    elif left_to_decompress <= self.header.sector_size:
+                        left_to_decompress += positions[0]
+                    if left_to_decompress != (end - start):
+                        uncompress = self._uncompress(to_read, force_pkware=block.pkware_imploded)
+                    else:
+                        uncompress = to_read
+                else:  # pkware
+                    uncompress = explode.explode(to_read)
                 if not isinstance(uncompress, set):
                     result += uncompress
                 else:
@@ -354,12 +376,12 @@ class MPQArchive(PrepareCryptTable):
     ZLIB_ERROR: typing.ClassVar = "ZLIB_ERROR"
     DECOMPRESSION_ERROR: typing.ClassVar = "DECOMPRESSION_ERROR"
     compressions: typing.ClassVar = {
-        0x40: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
-        0x80: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
-        0x01: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
-        0x02: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
-        0x08: {"short": "pkware", "desc": "Imploded(see PKWare Data Compression Library) (Should be impossible ?)", "meth": lambda x: -1},  # todo: implement
-        0x10: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
+        0b1000000: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
+        0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
+        0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
+        0b10: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
+        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},
+        0b10000: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
     }
 
     def _uncompress(self, raw: bytes, force_pkware=False) -> typing.Union[set, bytes]:
