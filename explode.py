@@ -239,7 +239,7 @@ def GenAscTabs(pWork):
                     if acc >= 0x100:
                         break
 
-        pChCodeAsc -= 1
+        pChCodeAscIdx -= 1
         count -= 1
 
 

@@ -7,6 +7,7 @@ import dataclasses
 import zlib
 import bz2
 import itertools
+import logging
 
 import explode
 import subprocess
@@ -51,9 +52,9 @@ class ArchiveTypes(enum.Enum):
 def yield_file_stream(path: pathlib.Path) -> typing.Generator[io.BufferedReader, typing.Any, None]:
     while True:
         with path.open("rb", buffering=io.DEFAULT_BUFFER_SIZE) as f:
-            print(path.name, "opened")
+            logging.info(f"{path.name} opened")
             yield f
-            print(path.name, "closed")
+            logging.info(f"{path.name} closed")
         while True:
             cont = yield
             if cont == "reopen":
@@ -179,14 +180,25 @@ class PrepareCryptTable:
 HashType = typing.NewType('HashType', int)
 
 
-def write_to_file(content):
-    with open("dump", 'wb') as file:
-        file.write(content)
-    return explode.explode(content)
-
-
-def analyze_pkware(content):
+class BlastError(Exception):
     pass
+
+
+def write_to_file(content):
+    try:
+        rv = explode.explode(content)
+        # res = subprocess.run(["WinBlast"], input=content, capture_output=True)
+        # if res.returncode < 0:
+        #     raise ValueError("Weird")
+        # rv = res.stdout
+    except Exception as e:
+        logging.error(f"Error during explode: {e}")
+        with open("dump", 'wb') as file:
+            file.write(content)
+        raise BlastError
+    else:
+        return rv
+
 
 @dataclasses.dataclass
 class MPQArchive(PrepareCryptTable):
@@ -300,7 +312,7 @@ class MPQArchive(PrepareCryptTable):
 
         hash_ = self.hash_entry(filename, locale, platform)
         if hash_ is self.NOTFOUND:
-            return b'', {hash_ + filename}
+            return b'', {hash_ + filename.replace('\\', '').replace('.', '')}
 
         block = self.block_table[hash_.block_index]
 
@@ -335,7 +347,7 @@ class MPQArchive(PrepareCryptTable):
         if block.other_compressions or block.pkware_imploded:
             positions_data = self.file.read(struct.calcsize("<I") * (sectors + 1))
             if block.encrypted:
-                key = self._hash(filename, 'TABLE')
+                key = self._hash(pathlib.Path(filename).name, 'TABLE')
                 if block.decrypt_key:
                     key = (key + block.file_position) ^ block.uncompressed_size
                 positions_data = self._decrypt(positions_data, key - 1)
@@ -348,17 +360,22 @@ class MPQArchive(PrepareCryptTable):
                 if block.encrypted:
                     to_read = self._decrypt(to_read, key + i)
                 if block.other_compressions:
-                    left_to_decompress = block.uncompressed_size - len(result)
-                    if left_to_decompress > self.header.sector_size:
-                        left_to_decompress = self.header.sector_size
-                    elif left_to_decompress <= self.header.sector_size:
-                        left_to_decompress += positions[0]
-                    if left_to_decompress != (end - start):
+                    needed_chunk = block.uncompressed_size - len(result)
+                    if needed_chunk > self.header.sector_size:
+                        needed_chunk = self.header.sector_size
+                    elif needed_chunk <= self.header.sector_size:
+                        needed_chunk += positions[0]
+                    if needed_chunk != (end - start):
+                        # todo: we could probably detect that early and simply read it into the result
+                        # but we have to be sure that we decrypt every block if it is even possible
                         uncompress = self._uncompress(to_read, force_pkware=block.pkware_imploded)
                     else:
                         uncompress = to_read
                 else:  # pkware
-                    uncompress = explode.explode(to_read)
+                    try:
+                        uncompress = write_to_file(to_read)
+                    except BlastError:
+                        return to_read, {"Malformed PKWARE DCL chunk", (filename, to_read, )}
                 if not isinstance(uncompress, set):
                     result += uncompress
                 else:
@@ -380,7 +397,7 @@ class MPQArchive(PrepareCryptTable):
         0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
         0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
         0b10: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
-        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},
+        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},  # todo: find why some files doesn't work
         0b10000: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
     }
 
@@ -402,6 +419,9 @@ class MPQArchive(PrepareCryptTable):
                     print(f"Zlib error {values['desc']} - {e}")
                     errors.add(self.ZLIB_ERROR)
                     continue
+                except BlastError:
+                    logging.error("Malformed PKWARE DCL chunk")
+                    errors.add("Malformed PKWARE DCL chunk")
                 if data == -1:
                     return {self.UNSUPPORTED_COMPRESSION + values['short']}
 
