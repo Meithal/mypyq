@@ -12,6 +12,10 @@ import logging
 import explode
 import subprocess
 
+# Complete rewrite of TheSil fork of the eagloflo's mpyq library.
+# to Decompress pkware dcl imploded files his explode script is also included.
+# c 2020
+
 
 def pairwise(iterable):
     "s -> (s0,s1), (s1,s2), (s2, s3), ..."

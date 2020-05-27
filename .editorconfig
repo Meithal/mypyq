@@ -2,9 +2,6 @@
 # top-most EditorConfig file
 root = true
 
-[*.js]
-indent_size = 2
-
 # Unix-style newlines with a newline ending every file
 [*.py]
 end_of_line = lf
