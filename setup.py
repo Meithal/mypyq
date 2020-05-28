@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from setuptools import setup
-from mpyq import __version__ as version
+from mypyq import __version__ as version
 
 setup(name='mypyq',
       version=version,

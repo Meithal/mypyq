@@ -16,6 +16,8 @@ import subprocess
 # to Decompress pkware dcl imploded files his explode script is also included.
 # c 2020, Zlib/Png License
 
+__version__ = "0.0.1"
+
 
 def pairwise(iterable):
     "s -> (s0,s1), (s1,s2), (s2, s3), ..."
@@ -48,12 +50,9 @@ common_files = [
     'war3mapUnits.doo'
 ]
 
-
-class ArchiveTypes(enum.Enum):
-    w3map = enum.auto()
-
-
-def yield_file_stream(path: pathlib.Path) -> typing.Generator[io.BufferedReader, typing.Any, None]:
+def yield_file_stream(path: pathlib.Path, keep_open: bool)\
+        -> typing.Generator[io.BufferedReader, typing.Any, None]:
+    yield_file_stream.keep_open = keep_open
     while True:
         with path.open("rb", buffering=io.DEFAULT_BUFFER_SIZE) as f:
             logging.info(f"{path.name} opened")
@@ -159,7 +158,7 @@ del v
 class PrepareCryptTable:
 
     def __init_subclass__(cls: typing.ForwardRef('MPQArchive'), **kwargs):
-        print("Creating the crypt table")
+        logging.info("Creating the crypt table")
 
         cls.crypt_table = [0] * 0x500
         seed = 0x00100001
@@ -216,19 +215,17 @@ class MPQArchive(PrepareCryptTable):
     hash_table: typing.List[MPQHashEntry] = dataclasses.field(default_factory=list)
     block_table: typing.List[MPQBlockEntry] = dataclasses.field(default_factory=list)
     mpq_map_name: bytes = b""
-    weird_thing_after_map_name: bytes = b""
-    weird_thing_after_map_name_int: int = 0
+    keep_open: dataclasses.InitVar[bool] = False
 
-    def __post_init__(self):
+    def __post_init__(self, keep_open: bool):
 
-        print(self.path.exists(), self.path.resolve(), self.path.stat())
         if not self.path.exists():
             raise OSError(f"{self.path.resolve()} doesn't appear to be a file.")
         self.filesize = self.path.stat().st_size
-        self.file_gen = yield_file_stream(self.path)
+        self.file_gen = yield_file_stream(self.path, keep_open)
         self.file = next(self.file_gen)
-        kind, offset = self.type_and_offset()
-        self.file.seek(offset)
+        self.parse_w3_header()
+        self.file.seek(0x200)
 
         # at this point, if we don't find the user data block, we can assume this map is protected.
         self.fill_user_data()
@@ -238,15 +235,12 @@ class MPQArchive(PrepareCryptTable):
 
         self.done_with_file()
 
-    def type_and_offset(self) -> typing.Tuple[ArchiveTypes, int]:
+    def parse_w3_header(self):
         self.file.seek(0, io.SEEK_SET)
         contents = self.file.peek()
         if contents[:4] == WAR3MAGIC:
             zero_index = contents.index(b'\0', 8)
             self.mpq_map_name = contents[8:zero_index]
-            self.weird_thing_after_map_name = contents[zero_index + 1: zero_index + 3]
-            self.weird_thing_after_map_name_int = int.from_bytes(self.weird_thing_after_map_name, byteorder='little')
-            return ArchiveTypes.w3map, 0x200
 
     def fill_user_data(self):
         contents = self.file.peek()
@@ -283,7 +277,7 @@ class MPQArchive(PrepareCryptTable):
                     *struct.unpack(instance.format_string, contents[hash_size * i:hash_size * i + hash_size])
                 ))
             except Exception as e:
-                print(e)
+                logging.error(e)
         self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
 
     def fill_hash_and_block_table(self):
@@ -313,12 +307,13 @@ class MPQArchive(PrepareCryptTable):
                 best = value
         return best
 
-    def read_file(self, filename: str, locale=0, platform=0):
+    def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
         errors = set()
+        # todo: find out why 7ff1a2-DotA Allstars v603b\PASBTNBlue_Lightning.blp takes so long
 
         hash_ = self.hash_entry(filename, locale, platform)
         if hash_ is self.NOTFOUND:
-            return b'', {hash_ + filename.replace('\\', '').replace('.', '')}
+            return b'', {hash_ + filename.replace('\\', '-').replace('.', '')}
 
         block = self.block_table[hash_.block_index]
 
@@ -380,7 +375,7 @@ class MPQArchive(PrepareCryptTable):
                     try:
                         uncompress = write_to_file(to_read)
                     except BlastError:
-                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read, )}
+                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read,)}
                 if not isinstance(uncompress, set):
                     result += uncompress
                 else:
@@ -392,18 +387,18 @@ class MPQArchive(PrepareCryptTable):
             value = self.file.read(block.uncompressed_size)
 
         self.done_with_file()
-        # todo: sanitize listfile
         return value, errors
 
     UNSUPPORTED_COMPRESSION: typing.ClassVar = "UNSUPPORTED_COMPRESSION"
     ZLIB_ERROR: typing.ClassVar = "ZLIB_ERROR"
     DECOMPRESSION_ERROR: typing.ClassVar = "DECOMPRESSION_ERROR"
-    compressions: typing.ClassVar = { # todo: use tuples
+    compressions: typing.ClassVar = {  # todo: use tuples
         0b1000000: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
         0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
         0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
         0b10: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
-        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},  # todo: find why some files doesn't work
+        # todo: all files in 9496bb-SVP Zombie Survivor Second Map V7 fail to deflate
+        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},
         0b10000: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
     }
 
@@ -418,11 +413,11 @@ class MPQArchive(PrepareCryptTable):
                 try:
                     data = values["meth"](data)
                 except OSError as e:
-                    print(f"Uncompress error for method {values['desc']} - {e}")
+                    logging.error(f"Uncompress error for method {values['desc']} - {e}")
                     errors.add(self.DECOMPRESSION_ERROR + values['short'])
                     continue
                 except zlib.error as e:
-                    print(f"Zlib error {values['desc']} - {e}")
+                    logging.error(f"Zlib error {values['desc']} - {e}")
                     errors.add(self.ZLIB_ERROR)
                     continue
                 except BlastError:
@@ -433,7 +428,9 @@ class MPQArchive(PrepareCryptTable):
 
         return errors or data
 
-    def done_with_file(self):  # todo: add a lock
+    def done_with_file(self):
+        if yield_file_stream.keep_open:  # this can be used to force the file open
+            return
         try:
             next(self.file_gen)
         except StopIteration:
@@ -469,10 +466,13 @@ class MPQArchive(PrepareCryptTable):
         seed2 = 0xEEEEEEEE
         result = io.BytesIO()  # todo: use a bytearray
 
-        for i in range(len(data) // 4):
+        for i in range(len(data) // 4 + bool(len(data) % 4)):
             seed2 += cls.crypt_table[0x400 + (seed1 & 0xFF)]
             seed2 &= 0xFFFFFFFF
-            value, = struct.unpack("<I", data[i * 4:i * 4 + 4])
+            array = data[i * 4:i * 4 + 4]
+            if len(array) < 4:
+                array = bytes(list(array) + [0] * (4 - len(array)))
+            value, = struct.unpack("<I", array)
             value = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
 
             seed1 = ((~seed1 << 21) + 0x11111111) | (seed1 >> 11)
@@ -480,10 +480,5 @@ class MPQArchive(PrepareCryptTable):
             seed2 = value + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
             result.write(struct.pack("<I", value))
-
-        # append any remaining data
-        rem = len(data) % 4
-        if rem:
-            result.write(data[-rem:])  # todo: this is probably wrong.
 
         return result.getvalue()
