@@ -14,7 +14,7 @@ import subprocess
 
 # Complete rewrite of TheSil fork of the eagloflo's mpyq library.
 # to Decompress pkware dcl imploded files his explode script is also included.
-# c 2020
+# c 2020, Zlib/Png License
 
 
 def pairwise(iterable):
@@ -24,9 +24,9 @@ def pairwise(iterable):
     return zip(a, b)
 
 
-war3magic = b"HM3W"
-mpqUserDataMagic = b"MPQ\x1B"
-mpqHeaderMagic = b"MPQ\x1A"
+WAR3MAGIC = b"HM3W"
+MPQ_USER_DATA_MAGIC = b"MPQ\x1B"
+MPQ_HEADER_MAGIC = b"MPQ\x1A"
 
 common_files = [
     '(attributes)',
@@ -122,7 +122,7 @@ class MPQHashEntry(FormattedTuple, format_string="2IHBBI"):
         return self.block_index == 0xFFFFFFFE
 
 
-@dataclasses.dataclass(repr=False)
+@dataclasses.dataclass()
 class MPQBlockEntry(FormattedTuple, format_string="4I"):
     file_position: int
     compressed_size: int
@@ -152,7 +152,6 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
 
 for k, v in MPQBlockEntry.flags_table.items():
     setattr(MPQBlockEntry, v['key'], property(lambda instance, key_=k: bool(instance.flags & key_), doc=v["long"]))
-    MPQBlockEntry.__annotations__.update({v['key']: bool})
 del k
 del v
 
@@ -190,11 +189,13 @@ class BlastError(Exception):
 
 def write_to_file(content):
     try:
-        rv = explode.explode(content)
-        # res = subprocess.run(["WinBlast"], input=content, capture_output=True)
-        # if res.returncode < 0:
-        #     raise ValueError("Weird")
-        # rv = res.stdout
+        if pathlib.Path("WinBlast.exe").exists():
+            res = subprocess.run(["WinBlast"], input=content, capture_output=True)
+            if res.returncode < 0:
+                raise ValueError("Weird")
+            rv = res.stdout
+        else:
+            rv = explode.explode(content)
     except Exception as e:
         logging.error(f"Error during explode: {e}")
         with open("dump", 'wb') as file:
@@ -229,7 +230,7 @@ class MPQArchive(PrepareCryptTable):
         kind, offset = self.type_and_offset()
         self.file.seek(offset)
 
-        # at this point, if we don't find the user data block, we can assume his map is protected
+        # at this point, if we don't find the user data block, we can assume this map is protected.
         self.fill_user_data()
         self.fill_header()
 
@@ -240,7 +241,7 @@ class MPQArchive(PrepareCryptTable):
     def type_and_offset(self) -> typing.Tuple[ArchiveTypes, int]:
         self.file.seek(0, io.SEEK_SET)
         contents = self.file.peek()
-        if contents[:4] == war3magic:
+        if contents[:4] == WAR3MAGIC:
             zero_index = contents.index(b'\0', 8)
             self.mpq_map_name = contents[8:zero_index]
             self.weird_thing_after_map_name = contents[zero_index + 1: zero_index + 3]
@@ -249,7 +250,7 @@ class MPQArchive(PrepareCryptTable):
 
     def fill_user_data(self):
         contents = self.file.peek()
-        if contents[:4] != mpqUserDataMagic:
+        if contents[:4] != MPQ_USER_DATA_MAGIC:
             return
         self.user_data = MPQUserData(
             *struct.unpack(MPQUserData.format_string, contents[:struct.calcsize(MPQUserData.format_string)])
@@ -257,7 +258,7 @@ class MPQArchive(PrepareCryptTable):
 
     def fill_header(self):
         contents = self.file.peek()
-        if contents[:4] != mpqHeaderMagic:
+        if contents[:4] != MPQ_HEADER_MAGIC:
             return
         self.header = MPQHeader(
             *struct.unpack(MPQHeader.format_string, contents[:struct.calcsize(MPQHeader.format_string)])
@@ -299,6 +300,7 @@ class MPQArchive(PrepareCryptTable):
     NOTFOUND: typing.ClassVar = "NOTFOUND"
     ZEROSIZE: typing.ClassVar = "ZEROSIZE"
     BLOCKFLAGNOTEXISTS: typing.ClassVar = "BLOCKFLAGNOTEXISTS"
+    MALFORMED_DCL_CHUNK: typing.ClassVar = "Malformed PKWARE DCL chunk"
 
     def hash_entry(self, filename, locale=0, platform=0):
         hash_a = self._hash(filename, 'HASH_A')
@@ -320,6 +322,7 @@ class MPQArchive(PrepareCryptTable):
 
         block = self.block_table[hash_.block_index]
 
+        # todo: move that in the block class.
         if block.uncompressed_size == 0:
             return b'', {self.ZEROSIZE}
 
@@ -342,11 +345,9 @@ class MPQArchive(PrepareCryptTable):
             return value, errors
 
         sectors, remainder = divmod(block.uncompressed_size, self.header.sector_size)
-        if remainder:
-            sectors += 1
 
-        if block.has_crc:
-            sectors += 1
+        sectors += bool(remainder)
+        sectors += bool(block.has_crc)
 
         if block.other_compressions or block.pkware_imploded:
             positions_data = self.file.read(struct.calcsize("<I") * (sectors + 1))
@@ -379,7 +380,7 @@ class MPQArchive(PrepareCryptTable):
                     try:
                         uncompress = write_to_file(to_read)
                     except BlastError:
-                        return to_read, {"Malformed PKWARE DCL chunk", (filename, to_read, )}
+                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read, )}
                 if not isinstance(uncompress, set):
                     result += uncompress
                 else:
@@ -391,12 +392,13 @@ class MPQArchive(PrepareCryptTable):
             value = self.file.read(block.uncompressed_size)
 
         self.done_with_file()
+        # todo: sanitize listfile
         return value, errors
 
     UNSUPPORTED_COMPRESSION: typing.ClassVar = "UNSUPPORTED_COMPRESSION"
     ZLIB_ERROR: typing.ClassVar = "ZLIB_ERROR"
     DECOMPRESSION_ERROR: typing.ClassVar = "DECOMPRESSION_ERROR"
-    compressions: typing.ClassVar = {
+    compressions: typing.ClassVar = { # todo: use tuples
         0b1000000: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
         0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
         0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
@@ -424,14 +426,14 @@ class MPQArchive(PrepareCryptTable):
                     errors.add(self.ZLIB_ERROR)
                     continue
                 except BlastError:
-                    logging.error("Malformed PKWARE DCL chunk")
-                    errors.add("Malformed PKWARE DCL chunk")
+                    logging.error(self.MALFORMED_DCL_CHUNK)
+                    errors.add(self.MALFORMED_DCL_CHUNK)
                 if data == -1:
                     return {self.UNSUPPORTED_COMPRESSION + values['short']}
 
         return errors or data
 
-    def done_with_file(self):
+    def done_with_file(self):  # todo: add a lock
         try:
             next(self.file_gen)
         except StopIteration:
@@ -461,11 +463,11 @@ class MPQArchive(PrepareCryptTable):
         return seed1
 
     @classmethod
-    def _decrypt(cls, data: bytes, key: HashType):
+    def _decrypt(cls, data: bytes, key: HashType) -> bytes:
         """Decrypt hash or block table or a sector."""
         seed1 = key
         seed2 = 0xEEEEEEEE
-        result = io.BytesIO()
+        result = io.BytesIO()  # todo: use a bytearray
 
         for i in range(len(data) // 4):
             seed2 += cls.crypt_table[0x400 + (seed1 & 0xFF)]
@@ -482,6 +484,6 @@ class MPQArchive(PrepareCryptTable):
         # append any remaining data
         rem = len(data) % 4
         if rem:
-            result.write(data[-rem:])
+            result.write(data[-rem:])  # todo: this is probably wrong.
 
         return result.getvalue()
