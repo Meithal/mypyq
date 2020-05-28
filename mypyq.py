@@ -50,7 +50,8 @@ common_files = [
     'war3mapUnits.doo'
 ]
 
-def yield_file_stream(path: pathlib.Path, keep_open: bool)\
+
+def yield_file_stream(path: pathlib.Path, keep_open: bool) \
         -> typing.Generator[io.BufferedReader, typing.Any, None]:
     yield_file_stream.keep_open = keep_open
     while True:
@@ -81,17 +82,12 @@ class MPQUserData(FormattedTuple, format_string="4s3I"):
     this_size: int
 
 
-class ArchiveFormatVersion(enum.Enum):
-    Original = 0
-    BurningCrusade = 1
-
-
 @dataclasses.dataclass
 class MPQHeader(FormattedTuple, format_string="4s2I2H4I"):
     magic: bytes
     header_size: int
     mpq_size: int
-    format_version: ArchiveFormatVersion
+    format_version: int
     block_size_exp: int
     hash_table_offset: int
     block_table_offset: int
@@ -140,6 +136,10 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         0x80000000: {'key': 'exists', 'long': "File exists"}
     }
 
+    ZERO_SIZE: typing.ClassVar = "ZEROSIZE"
+    BLOCKFLAGNOTEXISTS: typing.ClassVar = "BLOCKFLAGNOTEXISTS"
+    MALFORMED_DCL_CHUNK: typing.ClassVar = "Malformed PKWARE DCL chunk"
+
     def describe_flags(self):
         return ', '.join(value_["long"] for key_, value_ in self.flags_table.items() if self.flags & key_)
 
@@ -148,37 +148,147 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         dic.update({'flags': bin(self.flags)})
         return f"{dic} {self.describe_flags()}"
 
+    def extract_file(self, archive: 'MPQArchive', filename):
+        errors = set()
+        if self.uncompressed_size == 0:
+            return b'', {self.ZERO_SIZE}
+
+        if not self.exists:
+            return b'', {self.BLOCKFLAGNOTEXISTS}
+
+        offset = self.file_position + 0x200
+        if archive.file.closed:
+            archive.reopen_file()
+        archive.file.seek(offset, 0)
+
+        if self.single_sector:
+            if self.other_compressions and self.uncompressed_size > self.compressed_size:
+                value = self._uncompress(archive.file.read(self.compressed_size))
+                if isinstance(value, set):
+                    errors.update(value)
+            else:
+                value = archive.file.read(self.uncompressed_size)
+            archive.done_with_file()
+            return value, errors
+
+        sectors, remainder = divmod(self.uncompressed_size, archive.header.sector_size)
+
+        sectors += bool(remainder)
+        sectors += bool(self.has_crc)
+
+        if self.other_compressions or self.pkware_imploded:
+            positions_data = self.file.read(struct.calcsize("<I") * (sectors + 1))
+            if self.encrypted:
+                key = _hash(filename, 'TABLE')
+                if self.decrypt_key:
+                    key = (key + self.file_position) ^ self.uncompressed_size
+                positions_data = _decrypt(positions_data, key - 1)
+            positions = struct.unpack('<%dI' % (sectors + 1), positions_data)
+            result = bytearray()
+            raw_bytes_to_read = self.file.read(positions[-1])
+            for i, (start, end) in enumerate(pairwise([p - positions[0] for p in positions[:-1]] + [positions[-1]])):
+                to_read = raw_bytes_to_read[start:end]
+                if self.encrypted:
+                    to_read = _decrypt(to_read, key + i)
+                if self.other_compressions:
+                    needed_chunk = self.uncompressed_size - len(result)
+                    if needed_chunk > archive.header.sector_size:
+                        needed_chunk = archive.header.sector_size
+                    elif needed_chunk <= archive.header.sector_size:
+                        needed_chunk += positions[0]
+                    if needed_chunk != (end - start):
+                        # todo: we could probably detect that early and simply read it into the result
+                        # but we have to be sure that we decrypt every block if it is even possible
+                        uncompress = self._uncompress(to_read)
+                    else:
+                        uncompress = to_read
+                else:  # pkware
+                    try:
+                        uncompress = write_to_file(to_read)
+                    except BlastError:
+                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read,)}
+                if not isinstance(uncompress, set):
+                    result += uncompress
+                else:
+                    result += to_read
+                    errors.update(uncompress)
+
+            value = bytes(result)
+        else:
+            value = archive.file.read(self.uncompressed_size)
+
+        archive.done_with_file()
+        return value, errors
+
+    UNSUPPORTED_COMPRESSION: typing.ClassVar = "UNSUPPORTED_COMPRESSION"
+    ZLIB_ERROR: typing.ClassVar = "ZLIB_ERROR"
+    DECOMPRESSION_ERROR: typing.ClassVar = "DECOMPRESSION_ERROR"
+    compressions: typing.ClassVar = {  # todo: use tuples
+        0b1000000: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
+        0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
+        0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
+        0b10: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
+        # todo: all files in 9496bb-SVP Zombie Survivor Second Map V7 fail to deflate
+        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},
+        0b10000: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
+    }
+
+    def _uncompress(self, raw: bytes) -> typing.Union[set, bytes]:
+        compressions = raw[0]
+        data = raw[1:]
+        errors = set()
+        for mask, values in reversed([*self.compressions.items()]):
+            if not compressions & mask:
+                continue
+
+            try:
+                data = values["meth"](data)
+            except OSError as e:
+                logging.error(f"Uncompress error for method {values['desc']} - {e}")
+                errors.add(self.DECOMPRESSION_ERROR + values['short'])
+                continue
+            except zlib.error as e:
+                logging.error(f"Zlib error {values['desc']} - {e}")
+                errors.add(self.ZLIB_ERROR)
+                continue
+            except BlastError:
+                logging.error(self.MALFORMED_DCL_CHUNK)
+                errors.add(self.MALFORMED_DCL_CHUNK)
+
+            if data == -1:
+                return {self.UNSUPPORTED_COMPRESSION + values['short']}
+
+        return errors or data
+
 
 for k, v in MPQBlockEntry.flags_table.items():
     setattr(MPQBlockEntry, v['key'], property(lambda instance, key_=k: bool(instance.flags & key_), doc=v["long"]))
 del k
 del v
 
+logging.info("Creating the crypt table")
 
-class PrepareCryptTable:
-
-    def __init_subclass__(cls: typing.ForwardRef('MPQArchive'), **kwargs):
-        logging.info("Creating the crypt table")
-
-        cls.crypt_table = [0] * 0x500
-        seed = 0x00100001
-
-        for i in range(256):
-            index = i
-            for _ in range(5):
-                seed = (seed * 125 + 0b11) % 0x2AAAAB
-                temp1 = (seed & 0xFFFF) << 16
-
-                seed = (seed * 125 + 0b11) % 0x2AAAAB
-                temp2 = (seed & 0xFFFF)
-
-                cls.crypt_table[index] = (temp1 | temp2)
-
-                index += 256
-
-        super(**kwargs)
+_crypt_table = [0] * 0x500
 
 
+def _make_crypto():
+    seed = 0x00100001
+
+    for i in range(256):
+        index = i
+        for _ in range(5):
+            seed = (seed * 125 + 0b11) % 0x2AAAAB
+            temp1 = (seed & 0xFFFF) << 16
+
+            seed = (seed * 125 + 0b11) % 0x2AAAAB
+            temp2 = (seed & 0xFFFF)
+
+            _crypt_table[index] = (temp1 | temp2)
+
+            index += 256
+
+
+_make_crypto()
 HashType = typing.NewType('HashType', int)
 
 
@@ -205,10 +315,9 @@ def write_to_file(content):
 
 
 @dataclasses.dataclass
-class MPQArchive(PrepareCryptTable):
+class MPQArchive:
     path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
-    crypt_table: typing.ClassVar[typing.Dict[int, int]]
     file: typing.ClassVar[io.BufferedReader] = None
     user_data: typing.Optional[MPQUserData] = None
     header: MPQHeader = None
@@ -260,12 +369,12 @@ class MPQArchive(PrepareCryptTable):
         if self.header.format_version != 0:
             raise NotImplementedError("Burning crusade format not supported.")
 
-    def _fill_table(self, which: str, instance: typing.Type[typing.Union[MPQHashEntry, MPQBlockEntry]]):
+    def _fill_table(self, which: str, instance: typing.Type[MPQHashEntry, MPQBlockEntry]):
         self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
         hash_size = struct.calcsize(instance.format_string)
         contents = self.file.read(hash_size * getattr(self.header, "%s_table_entries" % which))
-        contents = self._decrypt(
-            contents[:16 * getattr(self.header, "%s_table_entries" % which)], self._hash('(%s table)' % which, 'TABLE')
+        contents = _decrypt(
+            contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
         )
         hash_size = struct.calcsize(instance.format_string)
 
@@ -292,13 +401,10 @@ class MPQArchive(PrepareCryptTable):
         return self.hash_entry("(listfile)", 0, 0) is not self.NOTFOUND
 
     NOTFOUND: typing.ClassVar = "NOTFOUND"
-    ZEROSIZE: typing.ClassVar = "ZEROSIZE"
-    BLOCKFLAGNOTEXISTS: typing.ClassVar = "BLOCKFLAGNOTEXISTS"
-    MALFORMED_DCL_CHUNK: typing.ClassVar = "Malformed PKWARE DCL chunk"
 
     def hash_entry(self, filename, locale=0, platform=0):
-        hash_a = self._hash(filename, 'HASH_A')
-        hash_b = self._hash(filename, 'HASH_B')
+        hash_a = _hash(filename, 'HASH_A')
+        hash_b = _hash(filename, 'HASH_B')
         best = self.NOTFOUND
         for value in self.hash_table:
             if value.name_part_a == hash_a and value.name_part_b == hash_b:
@@ -308,7 +414,6 @@ class MPQArchive(PrepareCryptTable):
         return best
 
     def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
-        errors = set()
         # todo: find out why 7ff1a2-DotA Allstars v603b\PASBTNBlue_Lightning.blp takes so long
 
         hash_ = self.hash_entry(filename, locale, platform)
@@ -317,116 +422,7 @@ class MPQArchive(PrepareCryptTable):
 
         block = self.block_table[hash_.block_index]
 
-        # todo: move that in the block class.
-        if block.uncompressed_size == 0:
-            return b'', {self.ZEROSIZE}
-
-        if not block.exists:
-            return b'', {self.BLOCKFLAGNOTEXISTS}
-
-        offset = block.file_position + 0x200
-        if self.file.closed:
-            self.reopen_file()
-        self.file.seek(offset, 0)
-
-        if block.single_sector:
-            if block.other_compressions and block.uncompressed_size > block.compressed_size:
-                value = self._uncompress(self.file.read(block.compressed_size))
-                if isinstance(value, set):
-                    errors.update(value)
-            else:
-                value = self.file.read(block.uncompressed_size)
-            self.done_with_file()
-            return value, errors
-
-        sectors, remainder = divmod(block.uncompressed_size, self.header.sector_size)
-
-        sectors += bool(remainder)
-        sectors += bool(block.has_crc)
-
-        if block.other_compressions or block.pkware_imploded:
-            positions_data = self.file.read(struct.calcsize("<I") * (sectors + 1))
-            if block.encrypted:
-                key = self._hash(pathlib.Path(filename).name, 'TABLE')
-                if block.decrypt_key:
-                    key = (key + block.file_position) ^ block.uncompressed_size
-                positions_data = self._decrypt(positions_data, key - 1)
-            positions = struct.unpack('<%dI' % (sectors + 1), positions_data)
-            result = bytearray()
-            raw_bytes_to_read = self.file.read(positions[-1])
-            i = 0
-            for start, end in pairwise([p - positions[0] for p in positions[:-1]] + [positions[-1]]):
-                to_read = raw_bytes_to_read[start:end]
-                if block.encrypted:
-                    to_read = self._decrypt(to_read, key + i)
-                if block.other_compressions:
-                    needed_chunk = block.uncompressed_size - len(result)
-                    if needed_chunk > self.header.sector_size:
-                        needed_chunk = self.header.sector_size
-                    elif needed_chunk <= self.header.sector_size:
-                        needed_chunk += positions[0]
-                    if needed_chunk != (end - start):
-                        # todo: we could probably detect that early and simply read it into the result
-                        # but we have to be sure that we decrypt every block if it is even possible
-                        uncompress = self._uncompress(to_read, force_pkware=block.pkware_imploded)
-                    else:
-                        uncompress = to_read
-                else:  # pkware
-                    try:
-                        uncompress = write_to_file(to_read)
-                    except BlastError:
-                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read,)}
-                if not isinstance(uncompress, set):
-                    result += uncompress
-                else:
-                    result += to_read
-                    errors.update(uncompress)
-                i += 1
-            value = bytes(result)
-        else:
-            value = self.file.read(block.uncompressed_size)
-
-        self.done_with_file()
-        return value, errors
-
-    UNSUPPORTED_COMPRESSION: typing.ClassVar = "UNSUPPORTED_COMPRESSION"
-    ZLIB_ERROR: typing.ClassVar = "ZLIB_ERROR"
-    DECOMPRESSION_ERROR: typing.ClassVar = "DECOMPRESSION_ERROR"
-    compressions: typing.ClassVar = {  # todo: use tuples
-        0b1000000: {"short": "monowav", "desc": "IMA ADPCM mono (.wav)", "meth": lambda x: -1},  # todo: implement
-        0b10000000: {"short": "stereowav", "desc": "IMA ADPCM stereo (.wav)", "meth": lambda x: -1},  # todo: implement
-        0b1: {"short": "huffman", "desc": "Huffman encoded", "meth": lambda x: -1},  # todo: implement
-        0b10: {"short": "zlib", "desc": "Deflated(see ZLib)", "meth": lambda x: zlib.decompress(x)},
-        # todo: all files in 9496bb-SVP Zombie Survivor Second Map V7 fail to deflate
-        0b1000: {"short": "pkware", "desc": "PKWARE DCL implode", "meth": lambda x: write_to_file(x)},
-        0b10000: {"short": "bzip2", "desc": "BZip2 compressed(see BZip2)", "meth": lambda x: bz2.decompress(x)}
-    }
-
-    def _uncompress(self, raw: bytes, force_pkware=False) -> typing.Union[set, bytes]:
-        compressions = raw[0]
-        if force_pkware:
-            compressions |= 0x08
-        data = raw[1:]
-        errors = set()
-        for mask, values in reversed([*self.compressions.items()]):
-            if compressions & mask:
-                try:
-                    data = values["meth"](data)
-                except OSError as e:
-                    logging.error(f"Uncompress error for method {values['desc']} - {e}")
-                    errors.add(self.DECOMPRESSION_ERROR + values['short'])
-                    continue
-                except zlib.error as e:
-                    logging.error(f"Zlib error {values['desc']} - {e}")
-                    errors.add(self.ZLIB_ERROR)
-                    continue
-                except BlastError:
-                    logging.error(self.MALFORMED_DCL_CHUNK)
-                    errors.add(self.MALFORMED_DCL_CHUNK)
-                if data == -1:
-                    return {self.UNSUPPORTED_COMPRESSION + values['short']}
-
-        return errors or data
+        return block.extract_file(self, pathlib.Path(filename).name)
 
     def done_with_file(self):
         if yield_file_stream.keep_open:  # this can be used to force the file open
@@ -439,46 +435,46 @@ class MPQArchive(PrepareCryptTable):
     def reopen_file(self):
         self.file = self.file_gen.send("reopen")
 
-    @classmethod
-    def _hash(cls, string: str, hash_type: str) -> HashType:
-        """Hash a string using MPQ's hash function."""
-        hash_types = {
-            'TABLE_OFFSET': 0,
-            'HASH_A': 1,
-            'HASH_B': 2,
-            'TABLE': 3
-        }
-        seed1 = 0x7FED7FED
-        seed2 = 0xEEEEEEEE
 
-        for ch in string.upper():
-            ch = ord(ch)
-            value = cls.crypt_table[(hash_types[hash_type] << 8) + ch]
-            seed1 = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
-            seed2 = ch + seed1 + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
+def _hash(string: str, hash_type: str) -> HashType:
+    """Hash a string using MPQ's hash function."""
+    hash_types = {
+        'TABLE_OFFSET': 0,
+        'HASH_A': 1,
+        'HASH_B': 2,
+        'TABLE': 3
+    }
+    seed1 = 0x7FED7FED
+    seed2 = 0xEEEEEEEE
 
-        return seed1
+    for ch in string.upper():
+        ch = ord(ch)
+        value = _crypt_table[(hash_types[hash_type] << 8) + ch]
+        seed1 = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
+        seed2 = ch + seed1 + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
-    @classmethod
-    def _decrypt(cls, data: bytes, key: HashType) -> bytes:
-        """Decrypt hash or block table or a sector."""
-        seed1 = key
-        seed2 = 0xEEEEEEEE
-        result = io.BytesIO()  # todo: use a bytearray
+    return seed1
 
-        for i in range(len(data) // 4 + bool(len(data) % 4)):
-            seed2 += cls.crypt_table[0x400 + (seed1 & 0xFF)]
-            seed2 &= 0xFFFFFFFF
-            array = data[i * 4:i * 4 + 4]
-            if len(array) < 4:
-                array = bytes(list(array) + [0] * (4 - len(array)))
-            value, = struct.unpack("<I", array)
-            value = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
 
-            seed1 = ((~seed1 << 21) + 0x11111111) | (seed1 >> 11)
-            seed1 &= 0xFFFFFFFF
-            seed2 = value + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
+def _decrypt(data: bytes, key: HashType) -> bytes:
+    """Decrypt hash or block table or a sector."""
+    seed1 = key
+    seed2 = 0xEEEEEEEE
+    result = io.BytesIO()  # todo: use a bytearray
 
-            result.write(struct.pack("<I", value))
+    for i in range(len(data) // 4 + bool(len(data) % 4)):
+        seed2 += _crypt_table[0x400 + (seed1 & 0xFF)]
+        seed2 &= 0xFFFFFFFF
+        array = data[i * 4:i * 4 + 4]
+        if len(array) < 4:
+            array = bytes(list(array) + [0] * (4 - len(array)))
+        value, = struct.unpack("<I", array)
+        value = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
 
-        return result.getvalue()
+        seed1 = ((~seed1 << 21) + 0x11111111) | (seed1 >> 11)
+        seed1 &= 0xFFFFFFFF
+        seed2 = value + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
+
+        result.write(struct.pack("<I", value))
+
+    return result.getvalue()
