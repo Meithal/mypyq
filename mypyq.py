@@ -372,6 +372,9 @@ class MPQArchive:
         self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
 
     def fill_hash_and_block_table(self):
+        if not self.header:
+            return
+
         self._fill_table('hash', MPQHashEntry)
         self._fill_table('block', MPQBlockEntry)
 
