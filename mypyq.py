@@ -117,7 +117,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     }
 
     ZERO_SIZE: typing.ClassVar = "ZEROSIZE"
-    BLOCKFLAGNOTEXISTS: typing.ClassVar = "BLOCKFLAGNOTEXISTS"
+    FLAG_NOT_EXISTS: typing.ClassVar = "FLAG_NOT_EXISTS"
     MALFORMED_DCL_CHUNK: typing.ClassVar = "Malformed PKWARE DCL chunk"
 
     def describe_flags(self):
@@ -134,7 +134,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
             return b'', {self.ZERO_SIZE}
 
         if not self.exists:
-            return b'', {self.BLOCKFLAGNOTEXISTS}
+            return b'', {self.FLAG_NOT_EXISTS}
 
         offset = self.file_position + 0x200
         if archive.file.closed:
@@ -167,6 +167,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
             result = bytearray()
             raw_bytes_to_read = archive.file.read(positions[-1])
             for i, (start, end) in enumerate(pairwise([p - positions[0] for p in positions[:-1]] + [positions[-1]])):
+                # todo: use a single iterator ?
                 to_read = raw_bytes_to_read[start:end]
                 if self.encrypted:
                     to_read = _decrypt(to_read, key + i)
@@ -441,21 +442,23 @@ def _decrypt(data: bytes, key: HashType) -> bytes:
     """Decrypt hash or block table or a sector."""
     seed1 = key
     seed2 = 0xEEEEEEEE
-    result = io.BytesIO()  # todo: use a bytearray
+    result = bytearray()
 
     for i in range(len(data) // 4 + bool(len(data) % 4)):
         seed2 += _crypt_table[0x400 + (seed1 & 0xFF)]
         seed2 &= 0xFFFFFFFF
-        array = data[i * 4:i * 4 + 4]
-        if len(array) < 4:
-            array = bytes(list(array) + [0] * (4 - len(array)))
-        value, = struct.unpack("<I", array)
+        store = bytearray(4)  # ensures we unpack into a bytearray of size 4
+        dat = data[i * 4:i * 4 + 4]  # it is probably faster to append zero bytes to the original data bytes
+        store[:len(dat)] = dat  # to ensure the stream has a length multiple of 4, but we need it to
+        # be a bytearray for it to not be a copy of a potentially large bytestream. which would in any case
+        # double the memory usage
+        value, = struct.unpack("<I", store)
         value = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
 
         seed1 = ((~seed1 << 21) + 0x11111111) | (seed1 >> 11)
         seed1 &= 0xFFFFFFFF
         seed2 = value + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
-        result.write(struct.pack("<I", value))
+        result += struct.pack("<I", value)
 
-    return result.getvalue()
+    return result
