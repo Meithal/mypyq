@@ -2,7 +2,6 @@ import struct
 import typing
 import io
 import pathlib
-import enum
 import dataclasses
 import zlib
 import bz2
@@ -17,10 +16,10 @@ import subprocess
 # c 2020, Zlib/Png License
 
 __version__ = "0.0.1"
-
+write_errors = True
 
 def pairwise(iterable):
-    "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+    """s -> (s0,s1), (s1,s2), (s2, s3), ..."""
     a, b = itertools.tee(iterable)
     next(b, None)
     return zip(a, b)
@@ -128,13 +127,13 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         dic.update({'flags': bin(self.flags)})
         return f"{dic} {self.describe_flags()}"
 
-    def extract_file(self, archive: 'MPQArchive', filename):
+    def extract_file(self, archive: 'MPQArchive', filename) -> typing.Tuple[bytes, set]:
         errors = set()
         if self.uncompressed_size == 0:
-            return b'', {self.ZERO_SIZE}
+            return b'', {f"{self.ZERO_SIZE} {self!r}"}
 
         if not self.exists:
-            return b'', {self.FLAG_NOT_EXISTS}
+            return b'', {f"{self.FLAG_NOT_EXISTS} {self!r}"}
 
         offset = self.file_position + 0x200
         if archive.file.closed:
@@ -143,12 +142,13 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
 
         if self.single_sector:
             if self.other_compressions and self.uncompressed_size > self.compressed_size:
-                value = self._uncompress(archive.file.read(self.compressed_size))
-                if isinstance(value, set):
-                    errors.update(value)
+                errors_, value = self._uncompress(archive.file.read(self.compressed_size), (filename, "whole"))
+                errors.update(errors_ and {f"single: {errors_} {self!r}"})
             else:
                 value = archive.file.read(self.uncompressed_size)
             archive.done_with_file()
+            if errors:
+                errors.add(repr(self))
             return value, errors
 
         sectors, remainder = divmod(self.uncompressed_size, archive.header.sector_size)
@@ -162,15 +162,19 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                 key = _hash(filename, 'TABLE')
                 if self.decrypt_key:
                     key = (key + self.file_position) ^ self.uncompressed_size
-                positions_data = _decrypt(positions_data, key - 1)
+                positions_data, rem = _decrypt(positions_data, key - 1)
             positions = struct.unpack('<%dI' % (sectors + 1), positions_data)
             result = bytearray()
             raw_bytes_to_read = archive.file.read(positions[-1])
             for i, (start, end) in enumerate(pairwise([p - positions[0] for p in positions[:-1]] + [positions[-1]])):
                 # todo: use a single iterator ?
                 to_read = raw_bytes_to_read[start:end]
+                rem = "Non encypted"
+                errors_ = set()
+
                 if self.encrypted:
-                    to_read = _decrypt(to_read, key + i)
+                    to_read, rem = _decrypt(to_read, key + i)
+
                 if self.other_compressions:
                     needed_chunk = self.uncompressed_size - len(result)
                     if needed_chunk > archive.header.sector_size:
@@ -180,22 +184,19 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     if needed_chunk != (end - start):
                         # todo: we could probably detect that early and simply read it into the result
                         # but we have to be sure that we decrypt every block if it is even possible
-                        uncompress = self._uncompress(to_read)
+                        errors_, uncompress = self._uncompress(to_read, (filename, i, len(positions)), rem)
                     else:
                         uncompress = to_read
                 else:  # pkware
-                    try:
-                        uncompress = write_to_file(to_read)
-                    except BlastError:
-                        return to_read, {self.MALFORMED_DCL_CHUNK, (filename, to_read,)}
-                if not isinstance(uncompress, set):
-                    result += uncompress
-                else:
-                    result += to_read
-                    errors.update(uncompress)
+                    errors_, uncompress = unblast(to_read)
+
+                result += uncompress
+                errors.update(errors_ and {f"{i}: {errors_} {self!r}"})
 
             value = bytes(result)
         else:
+            if self.encrypted:
+                raise ValueError("Should never happen.")
             value = archive.file.read(self.uncompressed_size)
 
         archive.done_with_file()
@@ -208,38 +209,54 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         0x40: ("monowav", lambda x: -1),  # todo: implement
         0x80: ("stereowav", lambda x: -1),  # todo: implement
         0x01: ("huffman", lambda x: -1),  # todo: implement
-        0x02: ("zlib", lambda x: zlib.decompress(x)),
+        0x02: ("zlib", lambda x: zlibb(x)),
         # todo: all files in 9496bb-SVP Zombie Survivor Second Map V7 fail to deflate
-        0x08: ("pkware", lambda x: write_to_file(x)),
+        0x08: ("pkware", lambda x: unblast(x)),
         0x10: ("bzip2", lambda x: bz2.decompress(x))
     }
 
-    def _uncompress(self, raw: bytes) -> typing.Union[set, bytes]:
+    def _uncompress(self, raw: bytes, debug_diag, rem=None) -> typing.Tuple[set, bytes]:
         compressions = raw[0]
-        data = raw[1:]
+        orig = raw[1:]
         errors = set()
+        dec = b""
         for mask, (short, meth) in reversed([*self.compressions.items()]):
             if not compressions & mask:
                 continue
-
             try:
-                data = meth(data)
+                dec = meth(orig)
+                if write_errors and short == "zlib":
+                    filename, part, max_parts = debug_diag
+                    with open(f"{filename} {part}-{max_parts} {rem} GOOD", 'wb') as f:
+                        f.write(orig)
+
+                if dec == -1:
+                    errors.add(self.UNSUPPORTED_COMPRESSION + short)
+                    dec = orig
+                    break
             except OSError as e:
                 logging.error(f"Uncompress error for method {short} - {e}")
                 errors.add(self.DECOMPRESSION_ERROR + short)
-                continue
             except zlib.error as e:
                 logging.error(f"Zlib error {short} - {e}")
                 errors.add(self.ZLIB_ERROR)
+            else:
                 continue
-            except BlastError:
-                logging.error(self.MALFORMED_DCL_CHUNK)
-                errors.add(self.MALFORMED_DCL_CHUNK)
 
-            if data == -1:
-                return {self.UNSUPPORTED_COMPRESSION + short}
+            if write_errors:
+                filename, part, max_parts = debug_diag
+                with open(f"{filename} {part}-{max_parts} {rem} BAD", 'wb') as f:
+                    f.write(orig)
 
-        return errors or data
+            dec = orig
+            break
+
+        return errors, dec
+
+
+def zlibb(val):
+    print("zlib", val[:10])
+    return zlib.decompress(val, 0)
 
 
 for k, (prop, desc) in MPQBlockEntry.flags_table.items():
@@ -274,11 +291,7 @@ _make_crypto()
 HashType = typing.NewType('HashType', int)
 
 
-class BlastError(Exception):
-    pass
-
-
-def write_to_file(content):
+def unblast(content) -> typing.Tuple[set, bytes]:
     try:
         if pathlib.Path("WinBlast.exe").exists():
             res = subprocess.run(["WinBlast"], input=content, capture_output=True)
@@ -291,9 +304,9 @@ def write_to_file(content):
         logging.error(f"Error during explode: {e}")
         with open("dump", 'wb') as file:
             file.write(content)
-        raise BlastError
+        return {MPQBlockEntry.MALFORMED_DCL_CHUNK}, content
     else:
-        return rv
+        return set(), rv
 
 
 @dataclasses.dataclass
@@ -355,7 +368,7 @@ class MPQArchive:
         self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
         hash_size = struct.calcsize(instance.format_string)
         contents = self.file.read(hash_size * getattr(self.header, "%s_table_entries" % which))
-        contents = _decrypt(
+        contents, rem = _decrypt(
             contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
         )
         hash_size = struct.calcsize(instance.format_string)
@@ -441,21 +454,18 @@ def _hash(string: str, hash_type: str) -> HashType:
     return seed1
 
 
-def _decrypt(data: bytes, key: HashType) -> bytes:
+def _decrypt(data: bytes, key: HashType) -> (bytes, int):
     """Decrypt hash or block table or a sector."""
     seed1 = key
     seed2 = 0xEEEEEEEE
     result = bytearray()
 
-    for i in range(len(data) // 4 + bool(len(data) % 4)):
+    for i in range(len(data) // 4):
         seed2 += _crypt_table[0x400 + (seed1 & 0xFF)]
         seed2 &= 0xFFFFFFFF
-        store = bytearray(4)  # ensures we unpack into a bytearray of size 4
-        dat = data[i * 4:i * 4 + 4]  # it is probably faster to append zero bytes to the original data bytes
-        store[:len(dat)] = dat  # to ensure the stream has a length multiple of 4, but we need it to
-        # be a bytearray for it to not be a copy of a potentially large bytestream. which would in any case
-        # double the memory usage
-        value, = struct.unpack("<I", store)
+        store = bytearray(4)
+        dat = data[i * 4:i * 4 + 4]
+        value, = struct.unpack("<I", dat)
         value = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
 
         seed1 = ((~seed1 << 21) + 0x11111111) | (seed1 >> 11)
@@ -463,5 +473,6 @@ def _decrypt(data: bytes, key: HashType) -> bytes:
         seed2 = value + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
         result += struct.pack("<I", value)
+    result += data[len(data) // 4 * 4 : (len(data) // 4 * 4) + len(data) % 4]
 
-    return result
+    return result, len(data) % 4
