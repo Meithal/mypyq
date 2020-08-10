@@ -16,7 +16,7 @@ import subprocess
 # c 2020, Zlib/Png License
 
 __version__ = "0.0.1"
-write_errors = True
+write_errors = False
 HashType = typing.NewType('HashType', int)
 
 
@@ -89,9 +89,12 @@ class MPQHashEntry(FormattedTuple, format_string="2IHBBI"):
     reserved: int
     block_index: int
     archive: dataclasses.InitVar['MPQArchive']
+    positions: dataclasses.InitVar[typing.Tuple[int, ...]]
+    index: dataclasses.InitVar[int] = -1
 
-    def __post_init__(self, archive: dataclasses.InitVar['MPQArchive']):
+    def __post_init__(self, archive: dataclasses.InitVar['MPQArchive'], positions, index=-1):
         self.archive = archive
+        self.index = index
 
     @property
     def was_always_empty(self):
@@ -115,9 +118,9 @@ def unblast(content) -> typing.Tuple[set, bytes]:
         logging.error(f"Error during explode: {e}")
         with open("dump", 'wb') as file:
             file.write(content)
-        return {MPQBlockEntry.MALFORMED_DCL_CHUNK}, content
+        return content
     else:
-        return set(), rv
+        return rv
 
 
 @dataclasses.dataclass
@@ -127,7 +130,8 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     uncompressed_size: int
     flags: int
     archive: dataclasses.InitVar['MPQArchive']
-    positions: typing.Tuple[int, ...] = dataclasses.field(init=False)
+    positions: dataclasses.InitVar[typing.Tuple[int, ...]]
+    index: dataclasses.InitVar[int] = -1
 
     flags_table: typing.ClassVar = {
         0x00000100: ('pkware_imploded', "PKWARE compressed file (imploded)"),
@@ -145,10 +149,11 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     FLAG_NOT_EXISTS: typing.ClassVar = "FLAG_NOT_EXISTS"
     MALFORMED_DCL_CHUNK: typing.ClassVar = "Malformed PKWARE DCL chunk"
 
-    def __post_init__(self, archive: dataclasses.InitVar['MPQArchive']):
+    def __post_init__(self, archive: dataclasses.InitVar['MPQArchive'], positions=None, index=-1):
 
         self.archive = archive
-        self.positions = tuple()
+        self.positions = positions
+        self.index = index
 
     def describe_flags(self):
         return ', '.join(desc for key, (_, desc) in self.flags_table.items() if self.flags & key)
@@ -178,7 +183,9 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     def __repr__(self):
         dic = dataclasses.asdict(self)
         dic.update({'flags': bin(self.flags)})
-        return f"{dic} {self.describe_flags()} Positions: {self.sectors_positions(self.archive.header.sector_size)}"
+        filename = self.archive.filename_for_index(self.index) or "**No name found**"
+
+        return f"{dic} - {filename} - {self.describe_flags()} Positions: {self.sectors_positions(self.archive)}"
 
     def extract_file(self, filename, archive: 'MPQArchive') -> typing.Tuple[bytes, set]:
         errors = set()
@@ -226,19 +233,19 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     needed_chunk = self.uncompressed_size - len(result)
                     if needed_chunk > archive.header.sector_size:
                         needed_chunk = archive.header.sector_size
-                    elif needed_chunk <= archive.header.sector_size:
-                        needed_chunk += positions[0]
+                    # elif needed_chunk <= archive.header.sector_size:
+                    #     needed_chunk += positions[0]
                     if needed_chunk != (end - start):
                         # todo: we could probably detect that early and simply read it into the result
                         # but we have to be sure that we decrypt every block if it is even possible
-                        errors_, uncompress = self._uncompress(to_read, (filename, i, len(positions)), rem)
+                        errors_, uncompress = self._uncompress(to_read, (filename, i+1, len(positions)-1), rem)
                     else:
                         uncompress = to_read
                 else:  # pkware
                     errors_, uncompress = unblast(to_read)
 
                 result += uncompress
-                errors.update(errors_ and {f"{i}: {errors_} {self!r}"})
+                errors.update(errors_ and {f"{i+1} on {len(positions)-1}: {errors_} {self!r}"})
 
             value = bytes(result)
         else:
@@ -281,11 +288,11 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     dec = orig
                     break
             except OSError as e:
-                logging.error(f"Uncompress error for method {short} - {e}")
-                errors.add(self.DECOMPRESSION_ERROR + short)
+                logging.error(f"Uncompress error for method {short} - {e} for {debug_diag}")
+                errors.add(self.DECOMPRESSION_ERROR + short + e)
             except zlib.error as e:
-                logging.error(f"Zlib error {short} - {e}")
-                errors.add(self.ZLIB_ERROR)
+                logging.error(f"Zlib error {short} - {e} for {debug_diag}")
+                errors.add(self.ZLIB_ERROR + e)
             else:
                 continue
 
@@ -370,7 +377,7 @@ class MPQArchive:
         for filename in filenames_to_test:
             hash_entry_ = self.hash_entry(filename)
             if isinstance(hash_entry_, MPQHashEntry):
-                self.filename_to_hash[filename] = hash_entry_.block_index
+                self.filename_to_hash[hash_entry_.block_index] = filename
 
     def insight(self):
         number_of_hash_entires = self.header.hash_table_entries
@@ -385,7 +392,7 @@ class MPQArchive:
             'number_of_hash_entires': number_of_hash_entires,
             'used_hash_table_entries': used_hash_table_entries,
             'number_of_block_entires': number_of_block_entires,
-            'block_size': self.header.sector_size,
+            'sector_size': self.header.sector_size,
             'block_indices': block_indices,
             'blocks': blocks
         }
@@ -417,19 +424,18 @@ class MPQArchive:
 
     def _fill_table(self, which: str, instance):
         self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
-        hash_size = struct.calcsize(instance.format_string)
-        contents = self.file.read(hash_size * getattr(self.header, "%s_table_entries" % which))
+        size = struct.calcsize(instance.format_string)
+        contents = self.file.read(size * getattr(self.header, "%s_table_entries" % which))
         contents, rem = _decrypt(
             contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
         )
-        hash_size = struct.calcsize(instance.format_string)
 
         where = getattr(self, "%s_table" % which)
 
         for i in range(getattr(self.header, "%s_table_entries" % which)):
             try:
                 where.append(instance(
-                    *struct.unpack(instance.format_string, contents[hash_size * i:hash_size * i + hash_size]), self
+                    *struct.unpack(instance.format_string, contents[size * i:size * i + size]), self, tuple(), i
                 ))
             except Exception as e:
                 logging.error(e)
@@ -448,6 +454,9 @@ class MPQArchive:
     @property
     def has_listfile(self):
         return self.hash_entry("(listfile)", 0, 0) is not self.NOTFOUND
+
+    def filename_for_index(self, index: int):
+        return self.filename_to_hash.get(index, None)
 
     NOTFOUND: typing.ClassVar = "NOTFOUND"
 
