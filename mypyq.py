@@ -7,6 +7,7 @@ import zlib
 import bz2
 import itertools
 import logging
+import functools
 
 import explode
 import subprocess
@@ -338,6 +339,9 @@ def _make_crypto():
 
 _make_crypto()
 
+_block_index_to_filename = {}
+_filename_to_hash_data = {}
+
 
 @dataclasses.dataclass
 class MPQArchive:
@@ -350,10 +354,9 @@ class MPQArchive:
     block_table: typing.List[MPQBlockEntry] = dataclasses.field(default_factory=list)
     mpq_map_name: bytes = b""
     keep_open: dataclasses.InitVar[bool] = False
-    filename_to_hash: dict = dataclasses.field(init=False)
     filenames_to_test: dataclasses.InitVar[tuple] = tuple()
 
-    def __post_init__(self, keep_open: bool, filenames_to_test: tuple=tuple()):
+    def __post_init__(self, keep_open: bool, filenames_to_test: typing.Tuple[str]=tuple()):
 
         if filenames_to_test is None:
             filenames_to_test = []
@@ -373,11 +376,16 @@ class MPQArchive:
 
         self.done_with_file()
 
-        self.filename_to_hash = {}
+        _block_index_to_filename[self] = {}
+        _filename_to_hash_data[self] = {}
         for filename in filenames_to_test:
             hash_entry_ = self.hash_entry(filename)
             if isinstance(hash_entry_, MPQHashEntry):
-                self.filename_to_hash[hash_entry_.block_index] = filename
+                _block_index_to_filename[self][hash_entry_.block_index] = filename, hash_entry_.locale, hash_entry_.platform
+                _filename_to_hash_data[self][filename, hash_entry_.locale, hash_entry_.platform] = hash_entry_
+
+    def __hash__(self):
+        return hash(str(self.path))
 
     def insight(self):
         number_of_hash_entires = self.header.hash_table_entries
@@ -456,15 +464,17 @@ class MPQArchive:
         return self.hash_entry("(listfile)", 0, 0) is not self.NOTFOUND
 
     def filename_for_index(self, index: int):
-        return self.filename_to_hash.get(index, None)
+        return _block_index_to_filename[self].get(index, None)
 
     NOTFOUND: typing.ClassVar = "NOTFOUND"
 
     def hash_entry(self, filename, locale=0, platform=0):
+        if (filename, locale, platform) in _filename_to_hash_data[self]:
+            return _filename_to_hash_data[self][filename, locale, platform]
         hash_a = _hash(filename, 'HASH_A')
         hash_b = _hash(filename, 'HASH_B')
         best = self.NOTFOUND
-        for value in self.hash_table:  # todo: this can be done in O(1)
+        for value in self.hash_table:
             if value.name_part_a == hash_a and value.name_part_b == hash_b:
                 if value.locale == locale and value.platform == platform:
                     return value
@@ -504,26 +514,31 @@ class MPQArchive:
         return self.file.tell()
 
 
+_hash_types = {
+    'TABLE_OFFSET': 0,
+    'HASH_A': 1,
+    'HASH_B': 2,
+    'TABLE': 3
+}
+
+
+@functools.lru_cache
 def _hash(string: str, hash_type: str) -> HashType:
     """Hash a string using MPQ's hash function."""
-    hash_types = {
-        'TABLE_OFFSET': 0,
-        'HASH_A': 1,
-        'HASH_B': 2,
-        'TABLE': 3
-    }
     seed1 = 0x7FED7FED
     seed2 = 0xEEEEEEEE
+    offset = _hash_types[hash_type] << 8
 
     for ch in string.upper():
         ch = ord(ch)
-        value = _crypt_table[(hash_types[hash_type] << 8) + ch]
+        value = _crypt_table[offset + ch]
         seed1 = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
         seed2 = ch + seed1 + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
     return seed1
 
 
+@functools.lru_cache
 def _decrypt(data: bytes, key: HashType) -> (bytes, int):
     """Decrypt hash or block table or a sector."""
     seed1 = key
