@@ -243,7 +243,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     else:
                         uncompress = to_read
                 else:  # pkware
-                    errors_, uncompress = unblast(to_read)
+                    uncompress = unblast(to_read)
 
                 result += uncompress
                 errors.update(errors_ and {f"{i+1} on {len(positions)-1}: {errors_} {self!r}"})

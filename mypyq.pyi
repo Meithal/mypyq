@@ -3,6 +3,9 @@ import dataclasses
 import pathlib
 import io
 
+class yield_file_stream:
+    keep_open: bool
+
 class FormattedTuple:
     format_string: typing.ClassVar[str]
 
@@ -83,3 +86,21 @@ class MPQArchive:
     block_table: typing.List[MPQBlockEntry] = dataclasses.field(default_factory=list)
     mpq_map_name: bytes = b""
     keep_open: dataclasses.InitVar[bool] = False
+    filenames_to_test: dataclasses.InitVar[tuple] = tuple()
+    filesize: int = 0
+
+    def __post_init__(self, keep_open: bool, filenames_to_test: typing.Tuple[str]=tuple()):
+        pass
+
+    def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
+        pass
+    
+    @property
+    def has_listfile(self) -> bool:
+        pass
+
+    def done_with_file(self):
+        pass
+    
+    def insight(self) -> dict:
+        pass
