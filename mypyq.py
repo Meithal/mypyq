@@ -519,7 +519,7 @@ _hash_types = {
 }
 
 
-@functools.lru_cache
+@functools.lru_cache(maxsize=None)
 def _hash(string: str, hash_type: str) -> HashType:
     """Hash a string using MPQ's hash function."""
     seed1 = 0x7FED7FED
@@ -535,7 +535,7 @@ def _hash(string: str, hash_type: str) -> HashType:
     return seed1
 
 
-@functools.lru_cache
+@functools.lru_cache(maxsize=None)
 def _decrypt(data: bytes, key: HashType) -> (bytes, int):
     """Decrypt hash or block table or a sector."""
     seed1 = key
