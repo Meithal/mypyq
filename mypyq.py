@@ -220,7 +220,6 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         if self.other_compressions or self.pkware_imploded:
             result = bytearray()
             raw_bytes_to_read = archive.file.read(positions[-1])
-            # for i, (start, end) in enumerate(pairwise([p - positions[0] for p in positions[:-1]] + [positions[-1]])):
             for i, (start, end) in enumerate(pairwise([p for p in positions[:-1]] + [positions[-1]])):
                 # todo: use a single iterator ?
                 to_read = raw_bytes_to_read[start:end]
@@ -234,8 +233,6 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     needed_chunk = self.uncompressed_size - len(result)
                     if needed_chunk > archive.header.sector_size:
                         needed_chunk = archive.header.sector_size
-                    # elif needed_chunk <= archive.header.sector_size:
-                    #     needed_chunk += positions[0]
                     if needed_chunk != (end - start):
                         # todo: we could probably detect that early and simply read it into the result
                         # but we have to be sure that we decrypt every block if it is even possible

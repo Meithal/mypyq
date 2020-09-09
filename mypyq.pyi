@@ -3,6 +3,8 @@ import dataclasses
 import pathlib
 import io
 
+__version__ = "0.0.1"
+
 class yield_file_stream:
     keep_open: bool
 
