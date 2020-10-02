@@ -82,12 +82,11 @@ class MPQHeader(FormattedTuple, format_string="4s2I2H4I"):
 
 
 @dataclasses.dataclass
-class MPQHashEntry(FormattedTuple, format_string="2IHBBI"):
+class MPQHashEntry(FormattedTuple, format_string="2IHHI"):
     name_part_a: int
     name_part_b: int
     locale: int
     platform: int
-    reserved: int
     block_index: int
     archive: dataclasses.InitVar['MPQArchive']
     positions: dataclasses.InitVar[typing.Tuple[int, ...]]
@@ -345,6 +344,7 @@ class MPQArchive:
     path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
     file: typing.ClassVar[io.BufferedReader] = None
+    raw_pre_archive: bytes = b''
     user_data: typing.Optional[MPQUserData] = None
     header: MPQHeader = None
     hash_table: typing.List[MPQHashEntry] = dataclasses.field(default_factory=list)
@@ -363,7 +363,8 @@ class MPQArchive:
         self.file_gen = yield_file_stream(self.path, keep_open)
         self.file = next(self.file_gen)
         self.parse_w3_header()
-        self.file.seek(0x200)
+        self.raw_pre_archive = self.file.read(self.header_offset)
+        self.file.seek(self.header_offset)
 
         # at this point, if we don't find the user data block, we can assume this map is protected.
         self.fill_user_data()
@@ -384,6 +385,9 @@ class MPQArchive:
     def __hash__(self):
         return hash(str(self.path))
 
+    def __contains__(self, item):
+        return self.hash_entry(item, 0, 0) is not self.NOTFOUND
+
     def insight(self):
         number_of_hash_entires = self.header.hash_table_entries
         used_hash_table_entries = len([h for h in self.hash_table if not (h.was_deleted or h.was_always_empty)])
@@ -393,13 +397,23 @@ class MPQArchive:
         for block_index in [h.block_index for h in self.hash_table if not (h.was_deleted or h.was_always_empty)]:
             block = self.block_table[block_index]
             blocks.append(repr(block))
+        hashes = []
+        for h in self.hash_table:
+            hashes.append(repr(h) + "({} {} {} {})".format(
+                h.name_part_a % self.header.hash_table_entries,
+                h.name_part_b % self.header.hash_table_entries,
+                (h.name_part_a + h.name_part_b) % self.header.hash_table_entries,
+                (h.name_part_a ^ h.name_part_b) % self.header.hash_table_entries,
+            ))
         return {
+            'header': {k: str(v) for k, v in dataclasses.asdict(self.header).items()},
             'number_of_hash_entires': number_of_hash_entires,
             'used_hash_table_entries': used_hash_table_entries,
             'number_of_block_entires': number_of_block_entires,
             'sector_size': self.header.sector_size,
             'block_indices': block_indices,
-            'blocks': blocks
+            'blocks': blocks,
+            'hashes': hashes
         }
 
     def parse_w3_header(self):

@@ -67,12 +67,11 @@ class MPQHeader(FormattedTuple, format_string="4s2I2H4I"):
     hash_table_entries: int
     block_table_entries: int
 
-class MPQHashEntry(FormattedTuple, format_string="2IHBBI"):
+class MPQHashEntry(FormattedTuple, format_string="2IHHI"):
     name_part_a: int
     name_part_b: int
     locale: int
     platform: int
-    reserved: int
     block_index: int
     archive: dataclasses.InitVar['MPQArchive']
 
@@ -82,6 +81,7 @@ class MPQArchive:
     path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
     file: typing.ClassVar[io.BufferedReader] = None
+    raw_pre_archive: bytes = b''
     user_data: typing.Optional[MPQUserData] = None
     header: MPQHeader = None
     hash_table: typing.List[MPQHashEntry] = dataclasses.field(default_factory=list)
