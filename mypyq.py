@@ -8,6 +8,7 @@ import bz2
 import itertools
 import logging
 import functools
+import collections
 
 import explode
 import subprocess
@@ -288,12 +289,12 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         return errors, dec
 
 
-def init_mpq_block_accessors():
+def _init_mpq_block_accessors():
     for k, (prop, desc) in MPQBlockEntry.flags_table.items():
         setattr(MPQBlockEntry, prop, property(lambda instance, key_=k: bool(instance.flags & key_), doc=desc))
 
 
-init_mpq_block_accessors()
+_init_mpq_block_accessors()
 
 logging.info("Creating the crypt table")
 
@@ -319,12 +320,13 @@ def _make_crypto():
 
 _make_crypto()
 
-_block_index_to_filename = {}
-_filename_to_hash_data = {}
+_block_index_to_filename = collections.defaultdict(dict)
+_filename_to_hash_data = collections.defaultdict(dict)
 
 
 class MPQArchive:
     stream: typing.BinaryIO  # actually required, but made optional so this dc can be inherited from
+    hash_: typing.AnyStr
     header_offset: typing.ClassVar[int] = 0x200
     raw_pre_archive: bytes
     user_data: typing.Optional[MPQUserData]
@@ -333,32 +335,32 @@ class MPQArchive:
     block_table: typing.List[MPQBlockEntry]
     filenames_to_test: typing.Tuple[str]
 
-    def __init__(self, stream, filenames_to_test: typing.Tuple[str] = tuple()):
-
+    def __init__(self, stream, hash_: typing.AnyStr, filenames_to_test: typing.Tuple[str] = tuple()):
         self.stream = stream
         if self.stream.closed:
             raise OSError("File is closed.")
         if not self.stream.readable() or not self.stream.seekable():
             raise OSError(f"Something wrong with the stream.")
+        self.hash_ = hash_
         self.raw_pre_archive = self.stream.read(self.header_offset)
         self.stream.seek(self.header_offset)
 
         # at this point, if we don't find the user data block, we can assume this map is protected.
-        self.fill_user_data()
-        self.header = self.fill_header()
+        self._fill_user_data()
+        self.header = self._fill_header()
 
-        self.hash_table = []
-        self.block_table = []
-        self.fill_hash_and_block_table()
+        self.hash_table = list(self._fill_table('hash', MPQHashEntry))
+        self.block_table = list(self._fill_table('block', MPQBlockEntry))
 
-        _block_index_to_filename[self] = {}
-        _filename_to_hash_data[self] = {}
         for filename in filenames_to_test:
             hash_entry_ = self.hash_entry(filename)
-            if isinstance(hash_entry_, MPQHashEntry):
-                _block_index_to_filename[self][
+            if hash_entry_:
+                _block_index_to_filename[hash(self)][
                     hash_entry_.block_index] = filename, hash_entry_.locale, hash_entry_.platform
-                _filename_to_hash_data[self][filename, hash_entry_.locale, hash_entry_.platform] = hash_entry_
+                _filename_to_hash_data[hash(self)][filename, hash_entry_.locale, hash_entry_.platform] = hash_entry_
+
+    def __hash__(self):
+        return hash(self.hash_)  # required so successive instances of the same mpq map to the same filename persist
 
     def __contains__(self, item):
         return self.hash_entry(item, 0, 0) is not None
@@ -391,7 +393,7 @@ class MPQArchive:
             'hashes': hashes
         }
 
-    def fill_user_data(self):
+    def _fill_user_data(self):
         contents = self.stream.read(struct.calcsize(MPQUserData.format_string))
         self.stream.seek(self.header_offset)
         if contents[:4] != MPQ_USER_DATA_MAGIC:
@@ -400,7 +402,7 @@ class MPQArchive:
             *struct.unpack(MPQUserData.format_string, contents[:struct.calcsize(MPQUserData.format_string)])
         )
 
-    def fill_header(self):
+    def _fill_header(self):
         contents = self.stream.read(struct.calcsize(MPQHeader.format_string))
         self.stream.seek(self.header_offset)
         if contents[:4] != MPQ_HEADER_MAGIC:
@@ -420,34 +422,25 @@ class MPQArchive:
             contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
         )
 
-        where = getattr(self, "%s_table" % which)
-
         for i in range(getattr(self.header, "%s_table_entries" % which)):
             try:
-                where.append(instance(
+                yield instance(
                     *struct.unpack(instance.format_string, contents[size * i:size * i + size]), self, tuple(), i
-                ))
+                )
             except Exception as e:
                 logging.error(e)
         self.stream.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
-
-    def fill_hash_and_block_table(self):
-        if not self.header:
-            return
-
-        self._fill_table('hash', MPQHashEntry)
-        self._fill_table('block', MPQBlockEntry)
 
     @property
     def has_listfile(self):
         return self.hash_entry("(listfile)", 0, 0) is not None
 
     def filename_for_index(self, index: int):
-        return _block_index_to_filename[self].get(index, None)
+        return _block_index_to_filename[hash(self)].get(index, None)
 
     def hash_entry(self, filename, locale=0, platform=0):
-        if (filename, locale, platform) in _filename_to_hash_data[self]:
-            return _filename_to_hash_data[self][filename, locale, platform]
+        if (filename, locale, platform) in _filename_to_hash_data[hash(self)]:
+            return _filename_to_hash_data[hash(self)][filename, locale, platform]
         hash_a = _hash(filename, 'HASH_A')
         hash_b = _hash(filename, 'HASH_B')
         best = None
