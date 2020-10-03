@@ -33,20 +33,6 @@ MPQ_USER_DATA_MAGIC = b"MPQ\x1B"
 MPQ_HEADER_MAGIC = b"MPQ\x1A"
 
 
-def yield_file_stream(path: pathlib.Path, keep_open: bool) \
-        -> typing.Generator[io.BufferedReader, typing.Any, None]:
-    yield_file_stream.keep_open = keep_open
-    while True:
-        with path.open("rb", buffering=io.DEFAULT_BUFFER_SIZE) as f:
-            logging.info(f"{path.name} opened")
-            yield f
-            logging.info(f"{path.name} closed")
-        while True:
-            cont = yield
-            if cont == "reopen":
-                break
-
-
 class FormattedTuple:
     format_string: typing.ClassVar[str]
 
@@ -171,7 +157,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         file_pos = archive.tell_file()
         archive.seek_file_to(self.file_position + 0x200)
 
-        positions_data = archive.file.read(struct.calcsize("<I") * (sectors + 1))
+        positions_data = archive.stream.read(struct.calcsize("<I") * (sectors + 1))
         if isinstance(decrypt_key, int):
             positions_data, rem = _decrypt(positions_data, HashType(decrypt_key))
         positions = struct.unpack('<%dI' % (sectors + 1), positions_data)
@@ -205,11 +191,10 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
 
         if self.single_sector:
             if self.other_compressions and self.uncompressed_size > self.compressed_size:
-                errors_, value = self._uncompress(archive.file.read(self.compressed_size), (filename, "whole"))
+                errors_, value = self._uncompress(archive.stream.read(self.compressed_size), (filename, "whole"))
                 errors.update(errors_ and {f"single: {errors_} {self!r}"})
             else:
-                value = archive.file.read(self.uncompressed_size)
-            archive.done_with_file()
+                value = archive.stream.read(self.uncompressed_size)
             if errors:
                 errors.add(repr(self))
             return value, errors
@@ -218,7 +203,7 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
 
         if self.other_compressions or self.pkware_imploded:
             result = bytearray()
-            raw_bytes_to_read = archive.file.read(positions[-1])
+            raw_bytes_to_read = archive.stream.read(positions[-1])
             for i, (start, end) in enumerate(pairwise([p for p in positions[:-1]] + [positions[-1]])):
                 # todo: use a single iterator ?
                 to_read = raw_bytes_to_read[start:end]
@@ -235,22 +220,21 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     if needed_chunk != (end - start):
                         # todo: we could probably detect that early and simply read it into the result
                         # but we have to be sure that we decrypt every block if it is even possible
-                        errors_, uncompress = self._uncompress(to_read, (filename, i+1, len(positions)-1), rem)
+                        errors_, uncompress = self._uncompress(to_read, (filename, i + 1, len(positions) - 1), rem)
                     else:
                         uncompress = to_read
                 else:  # pkware
                     uncompress = unblast(to_read)
 
                 result += uncompress
-                errors.update(errors_ and {f"{i+1} on {len(positions)-1}: {errors_} {self!r}"})
+                errors.update(errors_ and {f"{i + 1} on {len(positions) - 1}: {errors_} {self!r}"})
 
             value = bytes(result)
         else:
             if self.encrypted:
                 raise ValueError("Should never happen.")
-            value = archive.file.read(self.uncompressed_size)
+            value = archive.stream.read(self.uncompressed_size)
 
-        archive.done_with_file()
         return value, errors
 
     UNSUPPORTED_COMPRESSION: typing.ClassVar = "UNSUPPORTED_COMPRESSION"
@@ -339,54 +323,45 @@ _block_index_to_filename = {}
 _filename_to_hash_data = {}
 
 
-@dataclasses.dataclass
 class MPQArchive:
-    path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
+    stream: typing.BinaryIO  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
-    file: typing.ClassVar[io.BufferedReader] = None
-    raw_pre_archive: bytes = b''
-    user_data: typing.Optional[MPQUserData] = None
-    header: MPQHeader = None
-    hash_table: typing.List[MPQHashEntry] = dataclasses.field(default_factory=list)
-    block_table: typing.List[MPQBlockEntry] = dataclasses.field(default_factory=list)
-    mpq_map_name: bytes = b""
-    keep_open: dataclasses.InitVar[bool] = False
-    filenames_to_test: dataclasses.InitVar[tuple] = tuple()
+    raw_pre_archive: bytes
+    user_data: typing.Optional[MPQUserData]
+    header: MPQHeader
+    hash_table: typing.List[MPQHashEntry]
+    block_table: typing.List[MPQBlockEntry]
+    filenames_to_test: typing.Tuple[str]
 
-    def __post_init__(self, keep_open: bool, filenames_to_test: typing.Tuple[str]=tuple()):
+    def __init__(self, stream, filenames_to_test: typing.Tuple[str] = tuple()):
 
-        if filenames_to_test is None:
-            filenames_to_test = []
-        if not self.path.exists():
-            raise OSError(f"{self.path.resolve()} doesn't appear to be a file.")
-        self.filesize = self.path.stat().st_size
-        self.file_gen = yield_file_stream(self.path, keep_open)
-        self.file = next(self.file_gen)
-        self.parse_w3_header()
-        self.raw_pre_archive = self.file.read(self.header_offset)
-        self.file.seek(self.header_offset)
+        self.stream = stream
+        if self.stream.closed:
+            raise OSError("File is closed.")
+        if not self.stream.readable() or not self.stream.seekable():
+            raise OSError(f"Something wrong with the stream.")
+        self.raw_pre_archive = self.stream.read(self.header_offset)
+        self.stream.seek(self.header_offset)
 
         # at this point, if we don't find the user data block, we can assume this map is protected.
         self.fill_user_data()
-        self.fill_header()
+        self.header = self.fill_header()
 
+        self.hash_table = []
+        self.block_table = []
         self.fill_hash_and_block_table()
-
-        self.done_with_file()
 
         _block_index_to_filename[self] = {}
         _filename_to_hash_data[self] = {}
         for filename in filenames_to_test:
             hash_entry_ = self.hash_entry(filename)
             if isinstance(hash_entry_, MPQHashEntry):
-                _block_index_to_filename[self][hash_entry_.block_index] = filename, hash_entry_.locale, hash_entry_.platform
+                _block_index_to_filename[self][
+                    hash_entry_.block_index] = filename, hash_entry_.locale, hash_entry_.platform
                 _filename_to_hash_data[self][filename, hash_entry_.locale, hash_entry_.platform] = hash_entry_
 
-    def __hash__(self):
-        return hash(str(self.path))
-
     def __contains__(self, item):
-        return self.hash_entry(item, 0, 0) is not self.NOTFOUND
+        return self.hash_entry(item, 0, 0) is not None
 
     def insight(self):
         number_of_hash_entires = self.header.hash_table_entries
@@ -416,15 +391,9 @@ class MPQArchive:
             'hashes': hashes
         }
 
-    def parse_w3_header(self):
-        self.file.seek(0, io.SEEK_SET)
-        contents = self.file.peek()
-        if contents[:4] == WAR3MAGIC:
-            zero_index = contents.index(b'\0', 8)
-            self.mpq_map_name = contents[8:zero_index]
-
     def fill_user_data(self):
-        contents = self.file.peek()
+        contents = self.stream.read(struct.calcsize(MPQUserData.format_string))
+        self.stream.seek(self.header_offset)
         if contents[:4] != MPQ_USER_DATA_MAGIC:
             return
         self.user_data = MPQUserData(
@@ -432,19 +401,21 @@ class MPQArchive:
         )
 
     def fill_header(self):
-        contents = self.file.peek()
+        contents = self.stream.read(struct.calcsize(MPQHeader.format_string))
+        self.stream.seek(self.header_offset)
         if contents[:4] != MPQ_HEADER_MAGIC:
-            return
-        self.header = MPQHeader(
+            raise TypeError
+        header = MPQHeader(
             *struct.unpack(MPQHeader.format_string, contents[:struct.calcsize(MPQHeader.format_string)])
         )
-        if self.header.format_version != 0:
+        if header.format_version != 0:
             raise NotImplementedError("Burning crusade format not supported.")
+        return header
 
     def _fill_table(self, which: str, instance):
-        self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
+        self.stream.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
         size = struct.calcsize(instance.format_string)
-        contents = self.file.read(size * getattr(self.header, "%s_table_entries" % which))
+        contents = self.stream.read(size * getattr(self.header, "%s_table_entries" % which))
         contents, rem = _decrypt(
             contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
         )
@@ -458,7 +429,7 @@ class MPQArchive:
                 ))
             except Exception as e:
                 logging.error(e)
-        self.file.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
+        self.stream.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
 
     def fill_hash_and_block_table(self):
         if not self.header:
@@ -467,24 +438,19 @@ class MPQArchive:
         self._fill_table('hash', MPQHashEntry)
         self._fill_table('block', MPQBlockEntry)
 
-    def w3_filename(self):
-        return self.mpq_map_name
-
     @property
     def has_listfile(self):
-        return self.hash_entry("(listfile)", 0, 0) is not self.NOTFOUND
+        return self.hash_entry("(listfile)", 0, 0) is not None
 
     def filename_for_index(self, index: int):
         return _block_index_to_filename[self].get(index, None)
-
-    NOTFOUND: typing.ClassVar = "NOTFOUND"
 
     def hash_entry(self, filename, locale=0, platform=0):
         if (filename, locale, platform) in _filename_to_hash_data[self]:
             return _filename_to_hash_data[self][filename, locale, platform]
         hash_a = _hash(filename, 'HASH_A')
         hash_b = _hash(filename, 'HASH_B')
-        best = self.NOTFOUND
+        best = None
         for value in self.hash_table:
             if value.name_part_a == hash_a and value.name_part_b == hash_b:
                 if value.locale == locale and value.platform == platform:
@@ -496,33 +462,18 @@ class MPQArchive:
         # todo: find out why 7ff1a2-DotA Allstars v603b\PASBTNBlue_Lightning.blp takes so long
 
         hash_ = self.hash_entry(filename, locale, platform)
-        if hash_ is self.NOTFOUND:
-            return b'', {hash_ + filename.replace('\\', '-').replace('.', '')}
+        if hash_ is None:
+            return b'', {"Hash not found" + filename.replace('\\', '-').replace('.', '')}
 
         block = self.block_table[hash_.block_index]
 
         return block.extract_file(pathlib.Path(filename).name, self)
 
-    def done_with_file(self):
-        if yield_file_stream.keep_open:  # this can be used to force the file open
-            return
-        try:
-            next(self.file_gen)
-        except StopIteration:
-            pass
-
-    def reopen_file(self):
-        self.file = self.file_gen.send("reopen")
-
     def seek_file_to(self, position):
-        if self.file.closed:
-            self.reopen_file()
-        self.file.seek(position, 0)
+        self.stream.seek(position, 0)
 
     def tell_file(self):
-        if self.file.closed:
-            self.reopen_file()
-        return self.file.tell()
+        return self.stream.tell()
 
 
 _hash_types = {

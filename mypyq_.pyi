@@ -5,8 +5,6 @@ import io
 
 __version__ = "0.0.1"
 
-class yield_file_stream:
-    keep_open: bool
 
 class FormattedTuple:
     format_string: typing.ClassVar[str]
@@ -48,6 +46,9 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     def exists(self) -> bool:
         pass
 
+    def extract_file(self, filename, archive: 'MPQArchive') -> typing.Tuple[bytes, set]:
+        pass
+
 @dataclasses.dataclass()
 class MPQUserData(FormattedTuple, format_string="4s3I"):
     magic: bytes
@@ -78,20 +79,17 @@ class MPQHashEntry(FormattedTuple, format_string="2IHHI"):
 
 @dataclasses.dataclass
 class MPQArchive:
-    path: pathlib.Path = None  # actually required, but made optional so this dc can be inherited from
+    stream: typing.BinaryIO = None  # actually required, but made optional so this dc can be inherited from
     header_offset: typing.ClassVar[int] = 0x200
-    file: typing.ClassVar[io.BufferedReader] = None
     raw_pre_archive: bytes = b''
     user_data: typing.Optional[MPQUserData] = None
     header: MPQHeader = None
     hash_table: typing.List[MPQHashEntry] = dataclasses.field(default_factory=list)
     block_table: typing.List[MPQBlockEntry] = dataclasses.field(default_factory=list)
     mpq_map_name: bytes = b""
-    keep_open: dataclasses.InitVar[bool] = False
     filenames_to_test: dataclasses.InitVar[tuple] = tuple()
-    filesize: int = 0
 
-    def __post_init__(self, keep_open: bool, filenames_to_test: typing.Tuple[str]=tuple()):
+    def __post_init__(self, filenames_to_test: typing.Tuple[str]=tuple()):
         pass
 
     def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
@@ -101,8 +99,8 @@ class MPQArchive:
     def has_listfile(self) -> bool:
         pass
 
-    def done_with_file(self):
-        pass
-    
     def insight(self) -> dict:
+        pass
+
+    def hash_entry(self, filename, locale=0, platform=0) -> typing.Union[MPQHashEntry, str]:
         pass
