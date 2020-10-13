@@ -13,16 +13,12 @@ import collections
 import explode
 import subprocess
 
-# Complete rewrite of TheSil fork of the eagloflo's mpyq library.
-# to Decompress pkware dcl imploded files his explode script is also included.
-# c 2020, Zlib/Png License
-
 __version__ = "0.0.1"
 write_errors = False
 HashType = typing.NewType('HashType', int)
 
 
-def pairwise(iterable):
+def pairwise(iterable):  # from python manual
     """s -> (s0,s1), (s1,s2), (s2, s3), ..."""
     a, b = itertools.tee(iterable)
     next(b, None)
@@ -335,6 +331,26 @@ class MPQArchive:
     block_table: typing.List[MPQBlockEntry]
     filenames_to_test: typing.Tuple[str]
 
+    lang_id: typing.ClassVar = {
+        0x00000409: 'enUS',
+        0x00000809: 'enGB',
+        0x0000040c: 'frFR',
+        0x00000407: 'deDE',
+        0x0000040a: 'esES',
+        0x00000410: 'itIT',
+        0x00000405: 'csCZ',
+        0x00000419: 'ruRU',
+        0x00000415: 'plPL',
+        0x00000416: 'ptBR',
+        0x00000816: 'ptPT',
+        0x0000041f: 'tkTK',
+        0x00000411: 'jaJA',
+        0x00000412: 'koKR',
+        0x00000404: 'zhTW',
+        0x00000804: 'zhCN',
+        0x0000041e: 'thTH',
+    }
+
     def __init__(self, stream, hash_: typing.AnyStr, filenames_to_test: typing.Tuple[str] = tuple()):
         self.stream = stream
         if self.stream.closed:
@@ -353,17 +369,13 @@ class MPQArchive:
         self.block_table = list(self._fill_table('block', MPQBlockEntry))
 
         for filename in filenames_to_test:
-            hash_entry_ = self.hash_entry(filename)
-            if hash_entry_:
-                _block_index_to_filename[hash(self)][
-                    hash_entry_.block_index] = filename, hash_entry_.locale, hash_entry_.platform
-                _filename_to_hash_data[hash(self)][filename, hash_entry_.locale, hash_entry_.platform] = hash_entry_
+            self.test_filename(filename)
 
     def __hash__(self):
         return hash(self.hash_)  # required so successive instances of the same mpq map to the same filename persist
 
     def __contains__(self, item):
-        return self.hash_entry(item, 0, 0) is not None
+        return self._hash_entry(item, 0, 0) is not None
 
     def insight(self):
         number_of_hash_entires = self.header.hash_table_entries
@@ -376,12 +388,7 @@ class MPQArchive:
             blocks.append(repr(block))
         hashes = []
         for h in self.hash_table:
-            hashes.append(repr(h) + "({} {} {} {})".format(
-                h.name_part_a % self.header.hash_table_entries,
-                h.name_part_b % self.header.hash_table_entries,
-                (h.name_part_a + h.name_part_b) % self.header.hash_table_entries,
-                (h.name_part_a ^ h.name_part_b) % self.header.hash_table_entries,
-            ))
+            hashes.append(repr(h))
         return {
             'header': {k: str(v) for k, v in dataclasses.asdict(self.header).items()},
             'number_of_hash_entires': number_of_hash_entires,
@@ -392,6 +399,15 @@ class MPQArchive:
             'blocks': blocks,
             'hashes': hashes
         }
+
+    def test_filename(self, name: str):
+        hash_entry_ = self._hash_entry(name)
+        if hash_entry_:
+            _block_index_to_filename[hash(self)][
+                hash_entry_.block_index] = name, hash_entry_.locale, hash_entry_.platform
+            _filename_to_hash_data[hash(self)][name, hash_entry_.locale, hash_entry_.platform] = hash_entry_
+            return True
+        return False
 
     def _fill_user_data(self):
         contents = self.stream.read(struct.calcsize(MPQUserData.format_string))
@@ -433,12 +449,12 @@ class MPQArchive:
 
     @property
     def has_listfile(self):
-        return self.hash_entry("(listfile)", 0, 0) is not None
+        return self._hash_entry("(listfile)", 0, 0) is not None
 
     def filename_for_index(self, index: int):
         return _block_index_to_filename[hash(self)].get(index, None)
 
-    def hash_entry(self, filename, locale=0, platform=0):
+    def _hash_entry(self, filename: str, locale=0, platform=0) -> typing.Optional[MPQHashEntry]:
         if (filename, locale, platform) in _filename_to_hash_data[hash(self)]:
             return _filename_to_hash_data[hash(self)][filename, locale, platform]
         hash_a = _hash(filename, 'HASH_A')
@@ -454,7 +470,7 @@ class MPQArchive:
     def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
         # todo: find out why 7ff1a2-DotA Allstars v603b\PASBTNBlue_Lightning.blp takes so long
 
-        hash_ = self.hash_entry(filename, locale, platform)
+        hash_ = self._hash_entry(filename, locale, platform)
         if hash_ is None:
             return b'', {"Hash not found" + filename.replace('\\', '-').replace('.', '')}
 
