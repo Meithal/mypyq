@@ -16,6 +16,7 @@ import subprocess
 __version__ = "0.0.1"
 write_errors = False
 HashType = typing.NewType('HashType', int)
+FilePosition = typing.NewType('FilePosition', int)
 
 
 def pairwise(iterable):  # from python manual
@@ -28,6 +29,9 @@ def pairwise(iterable):  # from python manual
 WAR3MAGIC = b"HM3W"
 MPQ_USER_DATA_MAGIC = b"MPQ\x1B"
 MPQ_HEADER_MAGIC = b"MPQ\x1A"
+
+_block_index_to_filename = collections.defaultdict(dict)
+_filename_to_hash_data = collections.defaultdict(dict)
 
 
 class FormattedTuple:
@@ -58,6 +62,9 @@ class MPQHeader(FormattedTuple, format_string="4s2I2H4I"):
     block_table_offset: int
     hash_table_entries: int
     block_table_entries: int
+
+    offset_format: typing.ClassVar = "%s_table_offset"
+    entries_format: typing.ClassVar = "%s_table_entries"
 
     @property
     def sector_size(self):
@@ -108,7 +115,7 @@ def unblast(content) -> typing.Tuple[set, bytes]:
 
 @dataclasses.dataclass
 class MPQBlockEntry(FormattedTuple, format_string="4I"):
-    file_position: int
+    file_position: FilePosition
     compressed_size: int
     uncompressed_size: int
     flags: int
@@ -138,6 +145,13 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
         self.positions = positions
         self.index = index
 
+    def __repr__(self):
+        dic = dataclasses.asdict(self)
+        dic.update({'flags': bin(self.flags)})
+        filename = self.archive.filename_for_index(self.index) or "**No name found**"
+
+        return f"{dic} - {filename} - {self.describe_flags()} Positions: {self.sectors_positions(self.archive)}"
+
     def describe_flags(self):
         return ', '.join(desc for key, (_, desc) in self.flags_table.items() if self.flags & key)
 
@@ -162,13 +176,6 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
 
         archive.seek_file_to(file_pos)
         return positions
-
-    def __repr__(self):
-        dic = dataclasses.asdict(self)
-        dic.update({'flags': bin(self.flags)})
-        filename = self.archive.filename_for_index(self.index) or "**No name found**"
-
-        return f"{dic} - {filename} - {self.describe_flags()} Positions: {self.sectors_positions(self.archive)}"
 
     def extract_file(self, filename, archive: 'MPQArchive') -> typing.Tuple[bytes, set]:
         errors = set()
@@ -267,10 +274,10 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
                     break
             except OSError as e:
                 logging.error(f"Uncompress error for method {short} - {e} for {debug_diag}")
-                errors.add(self.DECOMPRESSION_ERROR + short + e)
+                errors.add(self.DECOMPRESSION_ERROR + short + str(e))
             except zlib.error as e:
                 logging.error(f"Zlib error {short} - {e} for {debug_diag}")
-                errors.add(self.ZLIB_ERROR + e)
+                errors.add(self.ZLIB_ERROR + str(e))
             else:
                 continue
 
@@ -316,9 +323,6 @@ def _make_crypto():
 
 _make_crypto()
 
-_block_index_to_filename = collections.defaultdict(dict)
-_filename_to_hash_data = collections.defaultdict(dict)
-
 
 class MPQArchive:
     stream: typing.BinaryIO  # actually required, but made optional so this dc can be inherited from
@@ -330,6 +334,7 @@ class MPQArchive:
     hash_table: typing.List[MPQHashEntry]
     block_table: typing.List[MPQBlockEntry]
     filenames_to_test: typing.Tuple[str]
+    tested_filenames: set
 
     lang_id: typing.ClassVar = {
         0x00000409: 'enUS',
@@ -368,8 +373,10 @@ class MPQArchive:
         self.hash_table = list(self._fill_table('hash', MPQHashEntry))
         self.block_table = list(self._fill_table('block', MPQBlockEntry))
 
+        self.tested_filenames = set()
+
         for filename in filenames_to_test:
-            self.test_filename(filename)
+            self.test_filename(filename, "list given at init")
 
     def __hash__(self):
         return hash(self.hash_)  # required so successive instances of the same mpq map to the same filename persist
@@ -397,17 +404,22 @@ class MPQArchive:
             'sector_size': self.header.sector_size,
             'block_indices': block_indices,
             'blocks': blocks,
-            'hashes': hashes
+            'hashes': hashes,
+            'tested_filenames': list(self.tested_filenames),
         }
 
-    def test_filename(self, name: str):
-        hash_entry_ = self._hash_entry(name)
+    def test_filename(self, name: str, reason: str, locale=0, platform=0):
+        hash_entry_ = self._hash_entry(name, locale, platform)
+        self.tested_filenames.add((reason, f"{bool(hash_entry_)}: {name}"))
         if hash_entry_:
             _block_index_to_filename[hash(self)][
-                hash_entry_.block_index] = name, hash_entry_.locale, hash_entry_.platform
-            _filename_to_hash_data[hash(self)][name, hash_entry_.locale, hash_entry_.platform] = hash_entry_
-            return True
-        return False
+                hash_entry_.block_index
+            ] = reason, name, hash_entry_.locale, hash_entry_.platform
+            _filename_to_hash_data[hash(self)][
+                name, hash_entry_.locale, hash_entry_.platform
+            ] = hash_entry_
+            return hash_entry_
+        return None
 
     def _fill_user_data(self):
         contents = self.stream.read(struct.calcsize(MPQUserData.format_string))
@@ -431,21 +443,22 @@ class MPQArchive:
         return header
 
     def _fill_table(self, which: str, instance):
-        self.stream.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
+        self.stream.seek(getattr(self.header, self.header.offset_format % which) + 0x200, io.SEEK_SET)
         size = struct.calcsize(instance.format_string)
-        contents = self.stream.read(size * getattr(self.header, "%s_table_entries" % which))
+        contents = self.stream.read(size * getattr(self.header, self.header.entries_format % which))
         contents, rem = _decrypt(
-            contents[:16 * getattr(self.header, "%s_table_entries" % which)], _hash('(%s table)' % which, 'TABLE')
+            contents[:16 * getattr(self.header, self.header.entries_format % which)],
+            _hash('(%s table)' % which, 'TABLE')
         )
 
-        for i in range(getattr(self.header, "%s_table_entries" % which)):
+        for i in range(getattr(self.header, self.header.entries_format % which)):
             try:
                 yield instance(
                     *struct.unpack(instance.format_string, contents[size * i:size * i + size]), self, tuple(), i
                 )
             except Exception as e:
                 logging.error(e)
-        self.stream.seek(getattr(self.header, "%s_table_offset" % which) + 0x200, io.SEEK_SET)
+        self.stream.seek(getattr(self.header, self.header.offset_format % which) + 0x200, io.SEEK_SET)
 
     @property
     def has_listfile(self):
@@ -467,22 +480,29 @@ class MPQArchive:
                 best = value
         return best
 
-    def read_file(self, filename: str, locale=0, platform=0) -> typing.Tuple[bytes, set]:
+    def read_file(self, filename: str, locale=0, platform=0, reason="direct read") -> typing.Tuple[bytes, set]:
         # todo: find out why 7ff1a2-DotA Allstars v603b\PASBTNBlue_Lightning.blp takes so long
 
-        hash_ = self._hash_entry(filename, locale, platform)
-        if hash_ is None:
+        hash_ = self.test_filename(filename, reason, locale, platform)
+        if not hash_:
             return b'', {"Hash not found" + filename.replace('\\', '-').replace('.', '')}
 
         block = self.block_table[hash_.block_index]
 
         return block.extract_file(pathlib.Path(filename).name, self)
 
-    def seek_file_to(self, position):
+    def seek_file_to(self, position: FilePosition):
         self.stream.seek(position, 0)
 
-    def tell_file(self):
-        return self.stream.tell()
+    def tell_file(self) -> FilePosition:
+        return FilePosition(self.stream.tell())
+
+    def all_files(self):
+        for index in range(len(self.block_table)):
+            yield self.filename_for_index(index)
+
+    def has_unknown_files(self):
+        return not all(file_ for file_ in self.all_files())
 
 
 _hash_types = {
