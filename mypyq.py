@@ -119,15 +119,15 @@ class MPQBlockEntry(FormattedTuple, format_string="4I"):
     flags: int
 
     # these are dummies replaced by getter/setter properties, are here only to shut lint warnings
-    pkware_imploded:bool = False
-    other_compressions:bool = False
-    encrypted:bool = False
-    decrypt_key:bool = False
-    is_patch:bool = False
-    single_sector:bool = False
-    deleted:bool = False
-    has_crc:bool = False
-    exists:bool = False
+    def pkware_imploded(self) -> bool: pass
+    def other_compressions(self) -> bool: pass
+    def encrypted(self) -> bool: pass
+    def decrypt_key(self) -> bool: pass
+    def is_patch(self) -> bool: pass
+    def single_sector(self) -> bool: pass
+    def deleted(self) -> bool: pass
+    def has_crc(self) -> bool: pass
+    def exists(self) -> bool: pass
 
     flags_table: typing.ClassVar = {
         0x00000100: ('pkware_imploded', "PKWare compressed file (imploded)."),
@@ -476,7 +476,7 @@ class MPQArchive:
     def test_filename(self, name: bytes, reason: str, locale=0, platform=0):
         hash_entry_ = self._hash_entry(name, locale, platform)
         
-        self.tested_filenames.add((bool(hash_entry_), name, reason))
+        self.tested_filenames.add((bool(hash_entry_), name.decode(), reason))
         
         return hash_entry_
 
@@ -579,7 +579,7 @@ class MPQArchive:
 
         hash_ = self.test_filename(filename, reason, locale, platform)
         if not hash_:
-            return b'', {"Hash not found " + (filename.replace(b'\\', b'-').replace(b'.', b'-dot-')).decode()}
+            return b'', {"Hash not found " + filename.decode()}
 
         block = self.block_table[hash_.block_index]
 
@@ -599,7 +599,7 @@ class MPQArchive:
             yield a_and_b_hashes_to_path_names[(hash_.name_part_a, hash_.name_part_b)]
 
     def unknown_files(self):
-        return [file_ for file_ in self.all_files() if not file_]
+        return [file_ for file_ in self.all_files() if isinstance(file_, tuple)]
 
     def add_file(self, name: bytes, md5_path: pathlib.Path=None, contents=b'', locale=0, platform=0):
         a, b = filename_to_hash_pair(name)
