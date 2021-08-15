@@ -12,11 +12,11 @@ import math
 import time
 import operator
 import _huffman
-import audioop
 
 import explode
 
 __version__ = "0.0.1"
+__author__ = "github.com/Meithal"
 
 listfile_name = b'(listfile)'
 attributes_name = b'(attributes)'
@@ -59,7 +59,7 @@ class _ABHashes(dict):
         return key_
 
 
-a_and_b_hashes_to_path_names = _ABHashes()
+a_and_b_hashes_to_path_names: typing.Dict[typing.Tuple[int, int], bytes] = _ABHashes()
 
 
 class _FormattedTuple:
@@ -92,8 +92,8 @@ class MPQHeader(_FormattedTuple, format_string="4s2I2H4I"):
     hash_table_entries: HashTableEntries
     block_table_entries: int
 
-    offset_format: typing.ClassVar = b"%s_table_offset"
-    entries_format: typing.ClassVar = b"%s_table_entries"
+    offset_format: typing.ClassVar[bytes] = b"%s_table_offset"
+    entries_format: typing.ClassVar[bytes] = b"%s_table_entries"
 
     @property
     def sector_size(self):
@@ -140,11 +140,12 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
     has_crc: typing.ClassVar[bool]
     exists: typing.ClassVar[bool]
 
-    flags_table: typing.ClassVar = {
+    flags_table: typing.ClassVar[typing.Dict] = {
         0x00000100: ('pkware_imploded', "PKWare compressed file (imploded)."),
         0x00000200: ('other_compressions', "Other compression than PKWare is used."),
         0x00010000: ('encrypted', "File is encrypted from its name (without path)."),
-        0x00020000: ('decrypt_key', "Additional layer of encryption from offset in archive and final file size."),
+        0x00020000: ('decrypt_key', "Additional layer of encryption from offset in "
+                                    "archive and final file size."),
         0x00100000: ('is_patch', "File is a patch."),
         0x01000000: ('single_sector', "Single block file."),
         0x02000000: ('deleted', "File is replaced by patch."),
@@ -159,18 +160,19 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
         dic = dataclasses.asdict(self)
         dic.update({'flags': bin(self.flags)})
 
-        return f"{dic} - {', '.join(desc for key, (_, desc) in self.flags_table.items() if self.flags & key)} "
+        descriptions = ', '.join(
+            desc for key, (_, desc) in self.flags_table.items() if self.flags & key
+        )
+
+        return f"{dic} - {descriptions} "
 
     def pack_tuple(self):
         return self.file_position, self.compressed_size, self.uncompressed_size, self.flags
 
-    def sectors_positions(self,
-                          stream: typing.BinaryIO,
-                          sector_size: int,
-                          *,
-                          decrypt_key: _HashType = None,
-                          offset=0
-                          ):
+    def sectors_positions(
+        self, stream: typing.BinaryIO, sector_size: int,
+        *, decrypt_key: _HashType = None, offset=0
+    ):
         if self.single_sector:
             return [0, self.compressed_size]
 
@@ -185,29 +187,43 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
         file_pos = stream.tell()
         stream.seek(self.file_position + offset)
 
-        positions_data = stream.read(struct.calcsize("<I") * (sectors + 1))  # an extra sector has total file size
-        if isinstance(decrypt_key, int):
-            positions_data = _decrypt(positions_data, _HashType(decrypt_key))
-        positions = struct.unpack('<%dI' % (sectors + 1), positions_data)
+        positions_data = stream.read(struct.calcsize("<i") * (sectors + 1))
+        # an extra sector has total file size
+
+        if decrypt_key is not None:
+            positions_data = _decrypt(positions_data, decrypt_key)
+
+        positions = struct.unpack('<%di' % (sectors + 1), positions_data)
 
         stream.seek(file_pos)
 
         if positions[-1] != self.compressed_size:
             self.errors.append(self.MALICIOUS_SECTOR_DATA)
-            # attempt to recover file nevertheless a malicious sector data
+            # attempt to recover file despite a malicious sector data
             if len(positions) > 2:
+                # if self.pkware_imploded:
+                #     content = stream.read(self.compressed_size)
+                #     prob = 0
+                #     for i in range(len(content) - 1):
+                #         try:
+                #             explode.explode(content)
+                #             # assert content[i] == 0 and 4 <= content[i+1] < 7
+                #         except Exception:
+                #             continue
+                #         else:
+                #             prob += 1
                 raise NotImplementedError("Implement this.")
             if any(map(lambda x: x > self.compressed_size, positions)):
                 # single sector is set to False yet the block doesn't have any sector data
                 positions = [0, self.compressed_size]
             else:
                 # positions are just completely gibberish
-                len_position_data = struct.calcsize("<I") * (sectors + 1)
+                len_position_data = struct.calcsize("<i") * (sectors + 1)
                 positions = [len_position_data, len_position_data + self.compressed_size]
 
         return positions
 
-    MALICIOUS_SECTOR_DATA: typing.ClassVar = "MALICIOUS_SECTOR_DATA"
+    MALICIOUS_SECTOR_DATA: typing.ClassVar[str] = "MALICIOUS_SECTOR_DATA"
 
     def extractable(self, filename=None):
         return not (not filename and self.encrypted)
@@ -222,9 +238,10 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
         #     return True
         return True
 
-    def extract_file(self, stream: typing.BinaryIO, sector_size: int,
-                     filename: bytes = b'',
-                     offset=0) -> bytes:
+    def extract_file(
+        self, stream: typing.BinaryIO, sector_size: int, 
+        filename: bytes = b'',offset=0
+    ) -> bytes:
         if self.uncompressed_size == 0:
             return b''
 
@@ -242,7 +259,9 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
             if self.decrypt_key:
                 key = (key + self.file_position) ^ self.uncompressed_size
 
-        positions = self.sectors_positions(stream, sector_size, decrypt_key=key and key - 1, offset=offset)
+        positions = self.sectors_positions(
+            stream, sector_size, decrypt_key=key and key - 1, offset=offset
+        )
 
         methods = []
         if self.uncompressed_size > self.compressed_size and self.pkware_imploded:
@@ -264,29 +283,29 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 methods = self._uncompress(to_read[0])
                 to_read = to_read[1:]
 
-            try:
-                # if we can gain space by decompression
-                for desc, method in methods:
-                    if self._need_to_decompress(
-                            decompressed_so_far=len(to_read),
-                            remaining=self.uncompressed_size - len(result),
-                            sector_size=sector_size):
-
+            # if we can gain space by decompression
+            for desc, method in methods:
+                if self._need_to_decompress(
+                        decompressed_so_far=len(to_read),
+                        remaining=self.uncompressed_size - len(result),
+                        sector_size=sector_size):
+                    try:
                         to_read = method(to_read)
+                    except Exception as e:
+                        self.errors.append(e)
+                        logging.exception(f"Error when decompressing a chunk of {filename} with "
+                                          f"method {desc}, content: {str(to_read)}")
+                        return bytes(raw_bytes_to_read)
 
                 result += to_read
-            except Exception as e:
-                self.errors.append(e)
-                logging.exception(f"Error when decompressing a chunk of {filename} with "
-                                  f"method {desc}, content: {str(to_read)}")
-                return bytes(raw_bytes_to_read)
+
 
         return bytes(result)
 
-    compressions: typing.ClassVar = {
-        0x20: ("sparse", lambda x: x),  # todo: implement
-        0x40: ("monowav", _huffman.monowav), # lambda x: audioop.adpcm2lin(x, 1, None)[0]),
-        0x80: ("stereowav", _huffman.stereowav), # lambda x: audioop.adpcm2lin(x, 2, None)[0]),
+    compressions: typing.ClassVar[dict] = {
+        # 0x20: ("sparse", lambda x: x),  # todo: implement
+        0x40: ("monowav", _huffman.monowav),  # lambda x: audioop.adpcm2lin(x, 1, None)[0]),
+        0x80: ("stereowav", _huffman.stereowav),  # lambda x: audioop.adpcm2lin(x, 2, None)[0]),
         0x01: ("huffman", _huffman.uncompress),
         0x02: ("zlib", zlib.decompress),
         0x08: ("pkware", explode.explode),
@@ -301,6 +320,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 query ^= mask
         if query != 0:
             self.errors.append(f"Wrongly assumed compression {bin(query)}")
+            raise NotImplementedError(f"Wrongly assumed compression {bin(query)}")
         return ret
 
     def pack(self, contents: bytes, destination: typing.BinaryIO, sector_size: int):
@@ -328,7 +348,9 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 buffer.write(b'\x02')
                 buffer.write(chunk)
                 offsets.append(len(chunk))
-            destination.write(struct.pack("<%dI" % (len(offsets) + 1), offsets + [self.uncompressed_size]))
+            destination.write(struct.pack(
+                "<%dI" % (len(offsets) + 1), offsets + [self.uncompressed_size])
+            )
             destination.write(buffer.getvalue())
 
 
@@ -363,7 +385,7 @@ class MPQArchive:
     stream: typing.BinaryIO
     boot_file_path: pathlib.Path
 
-    lang_id: typing.ClassVar = {
+    lang_id: typing.ClassVar[dict] = {
         0x00000409: 'enUS',
         0x00000809: 'enGB',
         0x0000040c: 'frFR',
@@ -387,41 +409,45 @@ class MPQArchive:
                  boot_stream: typing.BinaryIO = None,
                  *,
                  filenames_to_test: typing.Tuple[bytes] = tuple(),
-                 boot_file_path: typing.Optional[typing.Union[str, bytes, pathlib.PurePath]] = None,
-                 start_pad=None
+                 boot_file_path: typing.Optional[typing.Union[str, pathlib.PurePath]] = None,
+                 start_pad=None,
+                 print_listfile=False
                  ):
         """If given a stream, we don't close it"""
-        if boot_stream and boot_file_path:
-            raise RuntimeError("Provide either a stream you manage or a filepath, not both.")
+
         self.hash_table = []
         self.block_table = []
         self.start_pad = start_pad
         self.tested_filenames = set()
-
+        self.stream = None
+        self.boot_file_path = None
 
         if boot_stream:
-            if boot_stream.closed:
-                raise OSError("File is closed.")
-            if not boot_stream.readable() or not boot_stream.seekable():
-                raise OSError(f"Something wrong with the stream.")
             stream = boot_stream
             self.stream = boot_stream
-
         elif boot_file_path:
-            if isinstance(boot_file_path, str) or isinstance(boot_file_path, bytes):
-                if isinstance(boot_file_path, bytes):
-                    boot_file_path = boot_file_path.decode()
-                boot_file_path = pathlib.Path(boot_file_path)
-            self.boot_file_path = boot_file_path
+            self.boot_file_path = pathlib.Path(boot_file_path)
             stream = open(boot_file_path, 'rb')
+        else:
+            raise RuntimeError("Neither a stream nor a filepath has been provided.")
 
         if start_pad is None:
             self.start_pad = find_mpq_header(stream)
-        self.load_existing_stream(stream, filenames_to_test)
+
+        self.load_existing_stream(stream, filenames_to_test)  # delay until it is really needed?
 
         if boot_file_path:
             stream.close()
 
+        if print_listfile:
+            if listfile_name not in self:
+                logging.info("Asked listfile but none found.")
+            else:
+                file_, _ = self.read_file(
+                    FilePath(listfile_name),
+                    reason="asked to print listfile"
+                )
+                logging.info(file_)
 
     def __contains__(self, item):
         return self._hash_entry(item, 0, 0) is not None
@@ -453,8 +479,12 @@ class MPQArchive:
 
         maybe_better = None
         if b'\\\\' in name:
-            maybe_better = self.test_filename(FilePath(name.replace(b'\\\\', b'\\')),
-                                              "recursively try to remove repeated double slashes", locale, platform)
+            maybe_better = self.test_filename(
+                FilePath(name.replace(b'\\\\', b'\\')),
+                "recursively try to remove repeated double slashes",
+                locale,
+                platform
+            )
 
         if maybe_better is not None and hash_entry_ is None:
             return maybe_better
@@ -469,7 +499,10 @@ class MPQArchive:
             return
 
         self.user_data = _MPQUserData(
-            *struct.unpack(_MPQUserData.format_string, contents[:struct.calcsize(_MPQUserData.format_string)])
+            *struct.unpack(
+                _MPQUserData.format_string,
+                contents[:struct.calcsize(_MPQUserData.format_string)]
+            )
         )
 
     def _fill_header(self, stream):
@@ -480,7 +513,10 @@ class MPQArchive:
             raise TypeError
 
         header = MPQHeader(
-            *struct.unpack(MPQHeader.format_string, contents[:struct.calcsize(MPQHeader.format_string)])
+            *struct.unpack(
+                MPQHeader.format_string,
+                contents[:struct.calcsize(MPQHeader.format_string)]
+            )
         )
 
         if header.format_version != 0:
@@ -528,7 +564,8 @@ class MPQArchive:
     def has_listfile(self):
         return FilePath(b"(listfile)") in self
 
-    def _hash_entry(self, filename: FilePath, locale=0, platform=0) -> typing.Optional[MPQHashEntry]:
+    def _hash_entry(self, filename: FilePath, locale=0, platform=0) \
+            -> typing.Optional[MPQHashEntry]:
         hash_a, hash_b = filename_to_hash_pair(filename)
         index = index_for_path(filename, self.header.hash_table_entries)
 
@@ -541,20 +578,24 @@ class MPQArchive:
 
         return best
 
-    def read_file(self, filename: FilePath, *, locale=0, platform=0, reason="direct read") -> typing.Tuple[bytes, list]:
+    def read_file(self, filename: FilePath,
+                  *, locale=0, platform=0, reason="direct read", stream=None
+                  ) -> typing.Tuple[bytes, list]:
         """Extract the `filename` from the same stream that was used to fill
-        up header and block data previously. We pass in a new stream to not keep the file always open
-        and to not have to parse header, hash and block data every time.
-        The reason is where we have found the file name (listfile, guess, mentioned...) it can help
-        to decypher MPQ contents with incomplete listfiles for future reads.
-        
-        Returns a tuple with file contents as bytes and a set that has every error encountered trying
-        to read the file or an empty set if the read happened without errors."""
+        up header and block data previously. We pass in a new stream to not keep
+        the file always open and to not have to parse header, hash and block
+        data every time.
+        The reason is where we have found the file name (listfile, guess, mentioned...)
+        it can help to decypher MPQ contents with incomplete listfiles for future reads.
+
+        Returns a tuple with file contents as bytes and a set that has every
+        error encountered trying to read the file or an empty set if the
+        read happened without errors."""
 
         ad_hoc = False
-        if self.stream:
+        if not stream and self.stream:
             stream = self.stream
-        else:
+        elif not stream and self.boot_file_path:
             stream = self.boot_file_path.open('rb')
             ad_hoc = True
 
@@ -572,7 +613,7 @@ class MPQArchive:
             offset=self.start_pad
         )
         if block.errors:
-            logging.warning(f"Problem extracting {filename}: {block.errors}")
+            logging.warning("Problem extracting %s : %s", filename, str(block.errors))
         if ad_hoc:
             stream.close()
         return contents, block.errors
@@ -591,10 +632,11 @@ class MPQArchive:
         block = self.block_table[hash_.block_index]
         return block.extractable(filename)
 
-def find_mpq_header(stream:  typing.BinaryIO):
+
+def find_mpq_header(stream: typing.BinaryIO):
     orig = stream.tell()
     found = None
-    
+
     while True:
         ct = stream.read(4)
         if ct == _MPQ_HEADER_MAGIC:
@@ -602,6 +644,7 @@ def find_mpq_header(stream:  typing.BinaryIO):
             break
     stream.seek(orig)
     return found
+
 
 _hash_types = {
     'TABLE_OFFSET': 0,
@@ -713,6 +756,7 @@ def add_file(to_add: typing.Dict[bytes, typing.Dict],
              md5_path: pathlib.Path = None,
              contents=b'',
              locale=0, platform=0):
+
     to_add[name] = {
         'md5_path': md5_path,
         'locale': locale,
@@ -721,7 +765,11 @@ def add_file(to_add: typing.Dict[bytes, typing.Dict],
     }
 
 
-def flush(target: typing.BinaryIO, to_add: typing.Dict[bytes, typing.Dict], pre_header: bytes = b''):
+def flush(
+        target: typing.BinaryIO,
+        to_add: typing.Dict[bytes, typing.Dict],
+        pre_header: bytes = b''):
+
     target.write(pre_header)
 
     header = MPQHeader(
