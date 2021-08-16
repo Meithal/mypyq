@@ -287,18 +287,19 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 methods = self._uncompress(to_read[0])
                 to_read = to_read[1:]
 
-                # if we can gain space by decompression
-                for desc, method in methods:
-                    try:
-                        to_read = method(to_read)
-                        assert isinstance(to_read, (bytes, bytearray))
-                    except Exception as e:
-                        self.errors.append(str(e))
-                        logging.exception(f"Error when decompressing a chunk of {filename!s} with "
-                                          f"method {desc}, content: {str(to_read)}")
-                        return bytes(raw_bytes_to_read)
+            # if we can gain space by decompression
+            # the inentation is intentional to deal with
+            # self.other_compressions == False
+            for desc, method in methods:
+                try:
+                    to_read = method(to_read)
+                except Exception as e:
+                    self.errors.append(str(e))
+                    logging.exception(f"Error when decompressing a chunk of {filename!s} with "
+                                        f"method {desc}, content: {str(to_read)}")
+                    return bytes(raw_bytes_to_read)
 
-                    result += to_read
+                result += to_read
 
 
         return bytes(result)
