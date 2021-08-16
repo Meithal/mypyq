@@ -213,13 +213,13 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 #         else:
                 #             prob += 1
                 raise NotImplementedError("Implement this.")
-            if any(map(lambda x: x > self.compressed_size, positions)):
-                # single sector is set to False yet the block doesn't have any sector data
-                positions = (0, self.compressed_size)
-            else:
-                # positions are just completely gibberish
-                len_position_data = struct.calcsize("<i") * (sectors + 1)
-                positions = (len_position_data, len_position_data + self.compressed_size)
+            # if any(map(lambda x: x > self.compressed_size, positions)):
+            #     # single sector is set to False yet the block doesn't have any sector data
+            #     positions = (0, self.compressed_size)
+            # else:
+            # positions are just completely gibberish
+            len_position_data = struct.calcsize("<i") * (sectors + 1)
+            positions = (len_position_data, len_position_data + self.compressed_size)
 
         return positions
 
@@ -255,7 +255,9 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
 
         key = _HashType(0)
         if self.encrypted:
-            key = _hash(filename, 'TABLE')
+            key = _hash(
+                pathlib.PurePath(filename.decode('latin')).name.encode('latin'),
+                'TABLE')
             if self.decrypt_key:
                 key = _HashType((key + self.file_position) ^ self.uncompressed_size)
 
@@ -277,27 +279,25 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 to_read = _decrypt(to_read, _HashType(key + i))
 
             if self.other_compressions and self._need_to_decompress(
-                    decompressed_so_far=len(to_read),
-                    remaining=self.uncompressed_size - len(result),
-                    sector_size=sector_size):
+                decompressed_so_far=len(to_read),
+                remaining=self.uncompressed_size - len(result),
+                sector_size=sector_size):
+
                 methods = self._uncompress(to_read[0])
                 to_read = to_read[1:]
 
-            # if we can gain space by decompression
-            for desc, method in methods:
-                if self._need_to_decompress(
-                        decompressed_so_far=len(to_read),
-                        remaining=self.uncompressed_size - len(result),
-                        sector_size=sector_size):
+                # if we can gain space by decompression
+                for desc, method in methods:
                     try:
                         to_read = method(to_read)
+                        assert isinstance(to_read, (bytes, bytearray))
                     except Exception as e:
                         self.errors.append(str(e))
                         logging.exception(f"Error when decompressing a chunk of {filename!s} with "
                                           f"method {desc}, content: {str(to_read)}")
                         return bytes(raw_bytes_to_read)
 
-                result += to_read
+                    result += to_read
 
 
         return bytes(result)
@@ -320,7 +320,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 query ^= mask
         if query != 0:
             self.errors.append(f"Wrongly assumed compression {bin(query)}")
-            raise NotImplementedError(f"Wrongly assumed compression {bin(query)}")
+            raise NotImplementedError(f"Wrongly assumed compression {bin(query)}, {hex(query)}")
         return ret
 
     def pack(self, contents: bytes, destination: typing.BinaryIO, sector_size: int):
