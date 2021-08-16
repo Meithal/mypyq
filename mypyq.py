@@ -213,13 +213,13 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 #         else:
                 #             prob += 1
                 raise NotImplementedError("Implement this.")
-            # if any(map(lambda x: x > self.compressed_size, positions)):
-            #     # single sector is set to False yet the block doesn't have any sector data
-            #     positions = (0, self.compressed_size)
-            # else:
-            # positions are just completely gibberish
-            len_position_data = struct.calcsize("<i") * (sectors + 1)
-            positions = (len_position_data, len_position_data + self.compressed_size)
+            if any(map(lambda x: x > self.compressed_size, positions)):
+                # single sector is set to False yet the block doesn't have any sector data
+                positions = (0, self.compressed_size)
+            else:
+                # positions are just completely gibberish
+                len_position_data = struct.calcsize("<i") * (sectors + 1)
+                positions = (len_position_data, len_position_data + self.compressed_size)
 
         return positions
 
@@ -281,7 +281,8 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
             if self.other_compressions and self._need_to_decompress(
                 decompressed_so_far=len(to_read),
                 remaining=self.uncompressed_size - len(result),
-                sector_size=sector_size):
+                sector_size=sector_size
+            ):
 
                 methods = self._uncompress(to_read[0])
                 to_read = to_read[1:]
