@@ -18,12 +18,9 @@ import explode
 __version__ = "0.0.1"
 __author__ = "github.com/Meithal"
 
-listfile_name = b'(listfile)'
-attributes_name = b'(attributes)'
-signature_name = b'(signature)'
 
 _HashType = typing.NewType('_HashType', int)
-"Hashed version of a string, that MPQ can work with."
+"Hashed version of a FilePath, that MPQ can work with."
 _FilePosition = typing.NewType('_FilePosition', int)
 "An offset in the stream."
 HashTableEntries = typing.NewType('HashTableEntries', int)
@@ -36,6 +33,10 @@ For multi-OS compatibility, only backslashes have been observed as directory sep
 and every implementation capitalizes the letters of the path to
 allow unpacking on case insensitive file systems.
 """
+
+listfile_name = FilePath(b'(listfile)')
+attributes_name = FilePath(b'(attributes)')
+signature_name = FilePath(b'(signature)')
 
 
 @functools.lru_cache(maxsize=None)
@@ -278,17 +279,18 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
             if self.encrypted:
                 to_read = _decrypt(to_read, _HashType(key + i))
 
-            if self.other_compressions and self._need_to_decompress(
-                decompressed_so_far=len(to_read),
-                remaining=self.uncompressed_size - len(result),
-                sector_size=sector_size
-            ):
-
-                methods = self._uncompress(to_read[0])
-                to_read = to_read[1:]
+            if self.other_compressions:
+                methods = []
+                if self._need_to_decompress(
+                    decompressed_so_far=len(to_read),
+                    remaining=self.uncompressed_size - len(result),
+                    sector_size=sector_size
+                ):
+                    methods = self._uncompress(to_read[0])
+                    to_read = to_read[1:]
 
             # if we can gain space by decompression
-            # the inentation is intentional to deal with
+            # the indentation is intentional to deal with
             # self.other_compressions == False
             for desc, method in methods:
                 try:
@@ -296,10 +298,11 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 except Exception as e:
                     self.errors.append(str(e))
                     logging.exception(f"Error when decompressing a chunk of {filename!s} with "
-                                        f"method {desc}, content: {str(to_read)}")
+                                      f"method {desc}, content: {str(to_read[0:100])} "
+                                      f"(length: {len(to_read)})")
                     return bytes(raw_bytes_to_read)
 
-                result += to_read
+            result += to_read
 
 
         return bytes(result)
@@ -564,7 +567,7 @@ class MPQArchive:
 
     @property
     def has_listfile(self):
-        return FilePath(b"(listfile)") in self
+        return listfile_name in self
 
     def _hash_entry(self, filename: FilePath, locale=0, platform=0) \
             -> typing.Optional[MPQHashEntry]:
