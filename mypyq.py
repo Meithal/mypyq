@@ -6,7 +6,6 @@ import dataclasses
 import zlib
 import bz2
 import itertools
-import logging
 import functools
 import math
 import time
@@ -213,7 +212,8 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 #             continue
                 #         else:
                 #             prob += 1
-                raise NotImplementedError("Implement this.")
+                # NotImplementedError("Implement this.")
+                positions = (0, self.compressed_size)
             if any(map(lambda x: x > self.compressed_size, positions)):
                 # single sector is set to False yet the block doesn't have any sector data
                 positions = (0, self.compressed_size)
@@ -293,14 +293,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
             # the indentation is intentional to deal with
             # self.other_compressions == False
             for desc, method in methods:
-                try:
-                    to_read = method(to_read)
-                except Exception as e:
-                    self.errors.append(str(e))
-                    logging.exception(f"Error when decompressing a chunk of {filename!s} with "
-                                      f"method {desc}, content: {str(to_read[0:100])} "
-                                      f"(length: {len(to_read)})")
-                    return bytes(raw_bytes_to_read)
+                to_read = method(to_read)
 
             result += to_read
 
@@ -325,7 +318,6 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
                 query ^= mask
         if query != 0:
             self.errors.append(f"Wrongly assumed compression {bin(query)}")
-            raise NotImplementedError(f"Wrongly assumed compression {bin(query)}, {hex(query)}")
         return ret
 
     def pack(self, contents: bytes, destination: typing.BinaryIO, sector_size: int):
@@ -416,7 +408,6 @@ class MPQArchive:
                  filenames_to_test: typing.Tuple[bytes, ...] = tuple(),
                  boot_file_path: typing.Optional[typing.Union[str, pathlib.PurePath]] = None,
                  start_pad=0x200,
-                 print_listfile=False
                  ):
         """If given a stream, we don't close it"""
 
@@ -434,7 +425,9 @@ class MPQArchive:
             self.boot_file_path = pathlib.Path(boot_file_path)
             stream = open(boot_file_path, 'rb')
         else:
-            raise RuntimeError("Neither a stream nor a filepath has been provided.")
+            # Neither a stream nor a filepath has been provided.
+            # it will cause errors later
+            pass
 
         if start_pad is None:
             self.start_pad = find_mpq_header(stream)
@@ -444,15 +437,6 @@ class MPQArchive:
         if boot_file_path:
             stream.close()
 
-        if print_listfile:
-            if listfile_name not in self:
-                logging.info("Asked listfile but none found.")
-            else:
-                file_, _ = self.read_file(
-                    FilePath(listfile_name),
-                    reason="asked to print listfile"
-                )
-                logging.info(file_)
 
     def __contains__(self, item):
         return self._hash_entry(item, 0, 0) is not None
@@ -515,7 +499,7 @@ class MPQArchive:
         stream.seek(self.start_pad)
 
         if contents[:4] != _MPQ_HEADER_MAGIC:
-            raise TypeError
+            return None
 
         header = MPQHeader(
             *struct.unpack(
@@ -525,7 +509,8 @@ class MPQArchive:
         )
 
         if header.format_version != 0:
-            raise NotImplementedError("Burning crusade format not supported.")
+            # Burning crusade format not supported.
+            return None
 
         return header
 
@@ -551,12 +536,9 @@ class MPQArchive:
         for i in range(getattr(
                 self.header, (self.header.entries_format % which).decode()
         )):
-            try:
-                yield instance(
-                    *struct.unpack(instance.format_string, contents[size * i:size * i + size])
-                )
-            except Exception as e:
-                logging.error(e)
+            yield instance(
+                *struct.unpack(instance.format_string, contents[size * i:size * i + size])
+            )
 
         stream.seek(
             getattr(
@@ -617,8 +599,6 @@ class MPQArchive:
             filename=pathlib.PurePath(filename.decode()).name.encode(),
             offset=self.start_pad
         )
-        if block.errors:
-            logging.warning("Problem extracting %s : %s", filename, str(block.errors))
         if ad_hoc:
             stream.close()
         return contents, block.errors
@@ -660,8 +640,6 @@ _hash_types = {
     'HASH_B': 2,
     'TABLE': 3
 }
-
-logging.info("Creating the crypt table")
 
 _crypt_table = [0] * 0x500
 
