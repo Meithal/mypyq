@@ -10,7 +10,18 @@ import functools
 import math
 import time
 import operator
-import _huffman  # type: ignore
+
+try:
+    # some starcraft 1 files use these compressions.
+    # if you really need them you can use libmpq.
+    import _huffman  # type: ignore
+except ImportError:
+    _huffman = object()
+    def noop(x):
+        return x
+    setattr(_huffman, "monowav", noop)
+    setattr(_huffman, "stereowav", noop)
+    setattr(_huffman, "uncompress", noop)
 
 import explode
 
