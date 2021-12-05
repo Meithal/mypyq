@@ -18,9 +18,9 @@ __version__ = "0.0.1"
 __author__ = "github.com/Meithal"
 
 
-_HashType = typing.NewType('_HashType', int)
+HashType = typing.NewType('HashType', int)
 "Hashed version of a FilePath, that MPQ can work with."
-_FilePosition = typing.NewType('_FilePosition', int)
+FilePosition = typing.NewType('FilePosition', int)
 "An offset in the stream."
 HashTableEntries = typing.NewType('HashTableEntries', int)
 "A number that is a power of 2."
@@ -37,9 +37,29 @@ listfile_name = FilePath(b'(listfile)')
 attributes_name = FilePath(b'(attributes)')
 signature_name = FilePath(b'(signature)')
 
+lang_id = {
+    0x00000409: 'enUS',
+    0x00000809: 'enGB',
+    0x0000040c: 'frFR',
+    0x00000407: 'deDE',
+    0x0000040a: 'esES',
+    0x00000410: 'itIT',
+    0x00000405: 'csCZ',
+    0x00000419: 'ruRU',
+    0x00000415: 'plPL',
+    0x00000416: 'ptBR',
+    0x00000816: 'ptPT',
+    0x0000041f: 'tkTK',
+    0x00000411: 'jaJA',
+    0x00000412: 'koKR',
+    0x00000404: 'zhTW',
+    0x00000804: 'zhCN',
+    0x0000041e: 'thTH',
+}
+
 
 @functools.lru_cache(maxsize=None)
-def _closest_power_of_two(x) -> HashTableEntries:
+def closest_power_of_two(x) -> HashTableEntries:
     return HashTableEntries(math.ceil(math.log(x, 2)) * 2)
 
 
@@ -50,8 +70,8 @@ def _pairwise(iterable):  # from python manual
     return zip(a, b)
 
 
-_MPQ_USER_DATA_MAGIC = b"MPQ\x1B"
-_MPQ_HEADER_MAGIC = b"MPQ\x1A"
+MPQ_USER_DATA_MAGIC = b"MPQ\x1B"
+MPQ_HEADER_MAGIC = b"MPQ\x1A"
 
 
 class _ABHashes(dict):
@@ -123,7 +143,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
     A packed file with a locale and a platform.
     Size and flags tell how to uncompress the file.
     """
-    file_position: _FilePosition
+    file_position: FilePosition
     compressed_size: int
     uncompressed_size: int
     flags: int
@@ -171,7 +191,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
 
     def sectors_positions(
         self, stream: typing.BinaryIO, sector_size: int,
-        *, decrypt_key: _HashType, offset=0
+        *, decrypt_key: HashType, offset=0
     ):
         if self.single_sector:
             return [0, self.compressed_size]
@@ -191,7 +211,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
         # an extra sector has total file size
 
         if decrypt_key:
-            positions_data = _decrypt(positions_data, decrypt_key)
+            positions_data = decrypt(positions_data, decrypt_key)
 
         positions = struct.unpack('<%di' % (sectors + 1), positions_data)
 
@@ -254,16 +274,16 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
 
         stream.seek(self.file_position + offset)
 
-        key = _HashType(0)
+        key = HashType(0)
         if self.encrypted:
-            key = _hash(
+            key = hash_(
                 pathlib.PurePath(filename.decode('latin')).name.encode('latin'),
                 'TABLE')
             if self.decrypt_key:
-                key = _HashType((key + self.file_position) ^ self.uncompressed_size)
+                key = HashType((key + self.file_position) ^ self.uncompressed_size)
 
         positions = self.sectors_positions(
-            stream, sector_size, decrypt_key=_HashType(key and key - 1), offset=offset
+            stream, sector_size, decrypt_key=HashType(key and key - 1), offset=offset
         )
 
         methods = []
@@ -277,7 +297,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
             to_read = raw_bytes_to_read[start:end]
 
             if self.encrypted:
-                to_read = _decrypt(to_read, _HashType(key + i))
+                to_read = decrypt(to_read, HashType(key + i))
 
             if self.other_compressions:
                 methods = []
@@ -327,7 +347,7 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
         self.exists = True  # type: ignore
         self.uncompressed_size = len(contents)
         self.compressed_size = len(compressed)
-        self.file_position = _FilePosition(destination.tell())
+        self.file_position = FilePosition(destination.tell())
 
         if self.uncompressed_size <= sector_size:
             self.single_sector = True  # type: ignore
@@ -382,30 +402,9 @@ class MPQArchive:
     stream: typing.Optional[typing.BinaryIO]
     boot_file_path: typing.Optional[pathlib.Path]
 
-    lang_id: typing.ClassVar[dict] = {
-        0x00000409: 'enUS',
-        0x00000809: 'enGB',
-        0x0000040c: 'frFR',
-        0x00000407: 'deDE',
-        0x0000040a: 'esES',
-        0x00000410: 'itIT',
-        0x00000405: 'csCZ',
-        0x00000419: 'ruRU',
-        0x00000415: 'plPL',
-        0x00000416: 'ptBR',
-        0x00000816: 'ptPT',
-        0x0000041f: 'tkTK',
-        0x00000411: 'jaJA',
-        0x00000412: 'koKR',
-        0x00000404: 'zhTW',
-        0x00000804: 'zhCN',
-        0x0000041e: 'thTH',
-    }
-
     def __init__(self,
                  boot_stream: typing.BinaryIO = None,
                  *,
-                 filenames_to_test: typing.Tuple[bytes, ...] = tuple(),
                  boot_file_path: typing.Optional[typing.Union[str, pathlib.PurePath]] = None,
                  start_pad=0x200,
                  ):
@@ -432,7 +431,7 @@ class MPQArchive:
         if start_pad is None:
             self.start_pad = find_mpq_header(stream)
 
-        self.load_existing_stream(stream, filenames_to_test)  # delay until it is really needed?
+        self.load_existing_stream(stream)  # delay until it is really needed?
 
         if boot_file_path:
             stream.close()
@@ -441,7 +440,7 @@ class MPQArchive:
     def __contains__(self, item):
         return self._hash_entry(item, 0, 0) is not None
 
-    def load_existing_stream(self, stream, filenames_to_test):
+    def load_existing_stream(self, stream):
         self.raw_pre_archive = stream.read(self.start_pad)
         stream.seek(self.start_pad)
 
@@ -451,9 +450,6 @@ class MPQArchive:
 
         self.hash_table = list(self._fill_table(b'hash', MPQHashEntry, stream))
         self.block_table = list(self._fill_table(b'block', MPQBlockEntry, stream))
-
-        for filename in filenames_to_test:
-            self.test_filename(filename, "list given at init")
 
     def iter_hashes(self) -> typing.Iterator[MPQHashEntry]:
         for h in self.hash_table:
@@ -484,7 +480,7 @@ class MPQArchive:
         contents = stream.read(struct.calcsize(_MPQUserData.format_string))
         stream.seek(self.start_pad)
 
-        if contents[:4] != _MPQ_USER_DATA_MAGIC:
+        if contents[:4] != MPQ_USER_DATA_MAGIC:
             return
 
         self.user_data = _MPQUserData(
@@ -498,7 +494,7 @@ class MPQArchive:
         contents = stream.read(struct.calcsize(MPQHeader.format_string))
         stream.seek(self.start_pad)
 
-        if contents[:4] != _MPQ_HEADER_MAGIC:
+        if contents[:4] != MPQ_HEADER_MAGIC:
             return None
 
         header = MPQHeader(
@@ -526,11 +522,11 @@ class MPQArchive:
         contents = stream.read(
             size * getattr(self.header, (self.header.entries_format % which).decode())
         )
-        contents = _decrypt(
+        contents = decrypt(
             contents[:16 * getattr(
                 self.header, (self.header.entries_format % which).decode()
             )],
-            _hash(b'(%s table)' % which, 'TABLE')
+            hash_(b'(%s table)' % which, 'TABLE')
         )
 
         for i in range(getattr(
@@ -618,7 +614,6 @@ class MPQArchive:
             return False
         block = self.block_table[hash_.block_index]
         return block.extractable(filename)
-        
 
 
 def find_mpq_header(stream: typing.BinaryIO):
@@ -627,7 +622,7 @@ def find_mpq_header(stream: typing.BinaryIO):
 
     while True:
         ct = stream.read(4)
-        if ct == _MPQ_HEADER_MAGIC:
+        if ct == MPQ_HEADER_MAGIC:
             found = stream.tell() - 4
             break
     stream.seek(orig)
@@ -665,15 +660,15 @@ _make_crypto()
 
 
 @functools.lru_cache(maxsize=None)
-def filename_to_hash_pair(filename: bytes) -> typing.Tuple[_HashType, _HashType]:
-    hash_a = _hash(filename, 'HASH_A')
-    hash_b = _hash(filename, 'HASH_B')
+def filename_to_hash_pair(filename: bytes) -> typing.Tuple[HashType, HashType]:
+    hash_a = hash_(filename, 'HASH_A')
+    hash_b = hash_(filename, 'HASH_B')
     a_and_b_hashes_to_path_names[(hash_a, hash_b)] = filename
     return hash_a, hash_b
 
 
 @functools.lru_cache(maxsize=None)
-def _hash(string: bytes, hash_type: str) -> _HashType:
+def hash_(string: bytes, hash_type: str) -> HashType:
     """Hash a string using MPQ's hash function."""
     seed1 = 0x7FED7FED
     seed2 = 0xEEEEEEEE
@@ -684,10 +679,10 @@ def _hash(string: bytes, hash_type: str) -> _HashType:
         seed1 = (value ^ (seed1 + seed2)) & 0xFFFFFFFF
         seed2 = ch + seed1 + seed2 + (seed2 << 5) + 0b11 & 0xFFFFFFFF
 
-    return _HashType(seed1)
+    return HashType(seed1)
 
 
-def _decrypt(data: bytes, key: _HashType) -> bytearray:
+def decrypt(data: bytes, key: HashType) -> bytearray:
     """Decrypt hash or block table or a sector."""
     seed = 0xEEEEEEEE
     result = bytearray()
@@ -709,7 +704,7 @@ def _decrypt(data: bytes, key: _HashType) -> bytearray:
     return result
 
 
-def _encrypt(data: bytes, key: _HashType) -> bytearray:
+def encrypt(data: bytes, key: HashType) -> bytearray:
     seed = 0xEEEEEEEE
     result = bytearray()
 
@@ -731,92 +726,4 @@ def _encrypt(data: bytes, key: _HashType) -> bytearray:
 
 def index_for_path(path: bytes, hash_table_entries: HashTableEntries):
     """Returns the default index for a given path"""
-    return _hash(path, 'TABLE_OFFSET') & (hash_table_entries - 1)
-
-
-def add_file(to_add: typing.Dict[bytes, typing.Dict],
-             name: bytes,
-             *,
-             md5_path: pathlib.Path = None,
-             contents=b'',
-             locale=0, platform=0):
-
-    to_add[name] = {
-        'md5_path': md5_path,
-        'locale': locale,
-        'platform': platform,
-        'contents': contents,
-    }
-
-
-def flush(
-        target: typing.BinaryIO,
-        to_add: typing.Dict[bytes, typing.Dict],
-        pre_header: bytes = b''):
-
-    target.write(pre_header)
-
-    header = MPQHeader(
-        magic=_MPQ_HEADER_MAGIC,
-        header_size=struct.calcsize(MPQHeader.format_string),
-        mpq_size=0,
-        format_version=0,
-        block_size_exp=3,
-        hash_table_offset=0,
-        block_table_offset=0,
-        hash_table_entries=HashTableEntries(0),
-        block_table_entries=len(to_add) + 1
-    )
-    block_table: typing.List[MPQBlockEntry] = []
-    hash_table: typing.List[MPQHashEntry] = []
-
-    target.write(struct.pack(MPQHeader.format_string, *dataclasses.astuple(header)))
-
-    list_file = io.BytesIO()
-    for path in to_add.keys():
-        list_file.write(path)
-        list_file.write(b'\r\n')
-
-    add_file(to_add, b'(listfile)', contents=list_file.getvalue())
-
-    for path, file_data in to_add.items():
-        if file_data['md5_path']:
-            with open(file_data['md5_path'], "rb") as f:
-                content = f.read()
-        else:
-            content = file_data['contents']
-        block = MPQBlockEntry(_FilePosition(target.tell()), 0, len(content), 0)
-        a, b = filename_to_hash_pair(path)
-        hash_ = MPQHashEntry(
-            a,
-            b,
-            locale=file_data['locale'],
-            platform=file_data['platform'],
-            block_index=len(block_table)
-        )
-        hash_table.append(hash_)
-        block_table.append(block)
-        block.pack(content, target, header.sector_size)
-
-    header.hash_table_offset = target.tell()
-    buf = io.BytesIO()
-    for hash_ in hash_table:
-        buf.write(struct.pack(MPQHashEntry.format_string, *dataclasses.astuple(hash_)))
-    buffer: bytearray = _encrypt(
-        buf.getvalue(), _hash(b'(hash table)', 'TABLE')
-    )
-    target.write(buffer)
-    header.block_table_offset = target.tell()
-    buffer = bytearray()
-    for block in block_table:
-        buffer += struct.pack(MPQBlockEntry.format_string, *block.pack_tuple())
-    buffer = _encrypt(
-        bytes(buffer), _hash(b'(block table)', 'TABLE')
-    )
-
-    target.write(buffer)
-    header.mpq_size = target.tell()
-    header.hash_table_entries = _closest_power_of_two(len(hash_table))
-
-    target.seek(len(pre_header))
-    target.write(struct.pack(MPQHeader.format_string, *dataclasses.astuple(header)))
+    return hash_(path, 'TABLE_OFFSET') & (hash_table_entries - 1)
