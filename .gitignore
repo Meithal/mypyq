@@ -1,9 +1,5 @@
 venv
 .idea
 __pycache__
-*.zip
-node*
-_css
-projects/*/
 test/
 *.egg-info
