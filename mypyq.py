@@ -28,7 +28,12 @@ except ImportError:
         @staticmethod
         def uncompress(contents): return contents
 
-import explode
+try:
+    import explode
+except ModuleNotFoundError:
+    class explode:
+        @staticmethod
+        def explode(contents): return contents
 
 __version__ = "0.0.1"
 __author__ = "github.com/Meithal"
