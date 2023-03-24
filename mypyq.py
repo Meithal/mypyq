@@ -737,12 +737,12 @@ if __name__ == '__main__':
     import argparse
     import sys
     import os
+
+    script_name = (pathlib.Path('.') / sys.argv[0]).stem
     
     parser = argparse.ArgumentParser(
         description="A library and utility script that extracts mpq archives."
     )
-
-    #meg = parser.add_mutually_exclusive_group()
 
     parser.add_argument(
         'paths', nargs='*',
@@ -755,8 +755,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.bat:
-        with pathlib.Path(pathlib.PurePath(sys.argv[0]).stem + '.bat').open('w') as f:
-            f.write(f"python {sys.argv[0]} %*\n\npause")
+        with pathlib.Path(sys.argv[0]).with_suffix('.bat').open('w') as f:
+            f.write(f"python -m {script_name} %*\n\npause")
 
     for path in args.paths:
         path = pathlib.Path(path)

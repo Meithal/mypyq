@@ -1,7 +1,9 @@
-venv
-.idea
+/venv
+/.idea
 __pycache__
 test/
-*.egg-info
+/build
+/*.egg-info
 *.w3m
 *.w3x
+*.bat
