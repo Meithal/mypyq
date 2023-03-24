@@ -282,8 +282,9 @@ class MPQBlockEntry(_FormattedTuple, format_string="4I"):
 
     def extract_file(
             self, stream: typing.BinaryIO, sector_size: int,
-            filename: bytes = b'', offset=0
+            filename: bytes = b'', offset=0, force=False
     ) -> typing.Tuple[bytes, typing.List[str]]:
+        """extract this block inside a stream. If force is true, will extract it even if we can't decrypt its contents."""
         errors = []
 
         if self.uncompressed_size == 0:
@@ -589,9 +590,10 @@ class MPQArchive:
 
         return best
 
-    def read_file(self, stream: typing.BinaryIO, filename: FilePath,
-                  *, locale=0, platform=0, reason="direct read"
-                  ) -> typing.Tuple[bytes, list]:
+    def read_file(
+        self, stream: typing.BinaryIO, *, 
+        filename: FilePath = None, locale=0, platform=0, hash_entry=None, reason="direct read"
+    ) -> typing.Tuple[bytes, list]:
         """Extract the `filename` from the same stream that was used to fill
         up header and block data previously.
         We pass in a new stream to not keep the file always open
@@ -604,7 +606,8 @@ class MPQArchive:
         error encountered trying to read the file or an empty set if the
         read happened without errors."""
 
-        hash_entry = self.test_filename(filename, reason, locale, platform)
+        if not hash_entry:
+            hash_entry = self.test_filename(filename, reason, locale, platform)
         if not hash_entry:
             return b'', ["Hash not found " + filename.decode()]
 
@@ -729,3 +732,49 @@ def encrypt(data: bytes, key: HashType) -> bytearray:
 def index_for_path(path: bytes, hash_table_entries: HashTableEntries):
     """Returns the default index for a given path"""
     return hash_(path, 'TABLE_OFFSET') & (hash_table_entries - 1)
+
+if __name__ == '__main__':
+    import argparse
+    import sys
+    import os
+    
+    parser = argparse.ArgumentParser(
+        description="A library and utility script that extracts mpq archives."
+    )
+
+    #meg = parser.add_mutually_exclusive_group()
+
+    parser.add_argument(
+        'paths', nargs='*',
+        help=f"Paths to files to extract.")
+    parser.add_argument(
+        '--bat', action='store_true', 
+        help='Create a .bat file that you can drag and drop your mpq\'s onto')
+    parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
+
+    args = parser.parse_args()
+
+    if args.bat:
+        with pathlib.Path(pathlib.PurePath(sys.argv[0]).stem + '.bat').open('w') as f:
+            f.write(f"python {sys.argv[0]} %*\n\npause")
+
+    for path in args.paths:
+        path = pathlib.Path(path)
+        os.makedirs(path.stem, exist_ok=True)
+        with path.open('rb') as f:
+            ar = MPQArchive(f)
+            if not ar.has_listfile:
+                print(f"No listfile found in {path.name}. Skipping...")
+                continue
+
+            data, errors = ar.read_file(f, filename=listfile_name)
+            for line in data.splitlines():
+                (pathlib.Path('.') / path.stem / line.decode()).parent.mkdir(parents=True, exist_ok=True)
+                with (pathlib.Path('.') / path.stem / line.decode()).open('wb') as wf:
+                    contents, errors = ar.read_file(f, filename=line)
+                    wf.write(contents)
+            lfn = len(data.splitlines())
+            ttn = len(list(ar.all_files()))
+            print(f"{path.name}: extracted {lfn} out of {ttn} files")
+            if lfn != ttn:
+                print("Some files present in the archive are absent from its listfile")
